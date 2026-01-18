@@ -1,0 +1,437 @@
+version: '3'
+
+vars:
+  WEB_DIR: web
+  MOBILE_DIR: mobile
+  BASE_DIR: worker/base
+  API_DIR: api
+  BACKEND_DIR: api
+  DOCKER_IMAGE_EXPO: eisberg-expo
+  DOCKER_IMAGE_AGENT: eisberg-agent
+  VERCEL_PROJECT: eisberg
+  GCP_PROJECT: eisberg-ai
+  GCP_REGION: us-central1
+  GKE_CLUSTER: eisberg-workers
+  AR_REPO: eisberg
+  WORKER_IMAGE_NAME: worker
+  WORKER_IMAGE_TAG:
+    sh: date +%Y%m%d%H%M%S
+  AR_HOST: '{{.GCP_REGION}}-docker.pkg.dev'
+  WORKER_IMAGE_URI: '{{.AR_HOST}}/{{.GCP_PROJECT}}/{{.AR_REPO}}/{{.WORKER_IMAGE_NAME}}:{{.WORKER_IMAGE_TAG}}'
+  KEDA_VERSION: 2.14.1
+  KEDA_MANIFEST_URL: 'https://github.com/kedacore/keda/releases/download/v{{.KEDA_VERSION}}/keda-{{.KEDA_VERSION}}.yaml'
+
+tasks:
+  default:
+    desc: show available tasks
+    cmds:
+      - task --list
+
+  # TODO: "setup" task
+
+  init:
+    desc: initialize the project
+    cmds:
+      - conda activate eisberg
+
+  web:dev:
+    desc: start web development server
+    dir: '{{.WEB_DIR}}'
+    cmds:
+      - npm run dev
+
+  web:build:
+    desc: build web app for production
+    dir: '{{.WEB_DIR}}'
+    cmds:
+      - npm run build
+
+  web:start:
+    desc: start web production server
+    dir: '{{.WEB_DIR}}'
+    cmds:
+      - npm run start
+
+  web:lint:
+    desc: lint web app
+    dir: '{{.WEB_DIR}}'
+    cmds:
+      - npm run lint
+
+  api:dev:
+    desc: start API development server
+    dir: '{{.API_DIR}}'
+    cmds:
+      - npm run dev
+
+  api:build:
+    desc: build API for production
+    dir: '{{.API_DIR}}'
+    cmds:
+      - npm run build
+
+  api:start:
+    desc: start API production server
+    dir: '{{.API_DIR}}'
+    cmds:
+      - npm run start
+
+  # Backwards compatibility aliases
+  backend:dev:
+    desc: start backend development server (alias of api:dev)
+    cmds:
+      - task: api:dev
+
+  backend:build:
+    desc: build backend for production (alias of api:build)
+    cmds:
+      - task: api:build
+
+  backend:start:
+    desc: start backend production server (alias of api:start)
+    cmds:
+      - task: api:start
+
+  mobile:start:
+    desc: start mobile expo dev server
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - npm run start
+
+  mobile:ios:
+    desc: start mobile app on iOS simulator
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - npm run ios
+
+  mobile:ios:release:
+    desc: run iOS simulator using Release build + production env
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - EXPO_PUBLIC_BACKEND_ENV=remote EXPO_PUBLIC_AUTH_ENV=remote npm run ios -- --configuration Release
+
+  mobile:prebuild:clean:
+    desc: regenerate native iOS/Android projects (cleans and re-autolinks modules)
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - npx expo prebuild --clean
+
+  mobile:pods:install:
+    desc: install iOS pods after prebuild
+    dir: '{{.MOBILE_DIR}}/ios'
+    cmds:
+      - pod install
+
+  mobile:prepare:native:
+    desc: refresh native projects and pods after adding native deps
+    cmds:
+      - task: mobile:prebuild:clean
+      - task: mobile:pods:install
+
+  mobile:android:
+    desc: start mobile app on Android emulator
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - npm run android
+
+  mobile:web:
+    desc: start mobile app in web browser
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - npm run web
+
+  mobile:eas:ios:
+    desc: build an iOS release via EAS (used for TestFlight)
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - node scripts/bump-build.js
+      - bunx eas build --platform ios --profile production --non-interactive
+
+  mobile:testflight:submit:
+    desc: upload the latest EAS iOS build to TestFlight
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - bunx eas submit --platform ios --profile production --latest --non-interactive
+
+  mobile:deploy:
+    desc: build and submit the latest iOS build to TestFlight
+    cmds:
+      - task: mobile:prepare:native
+      - task: mobile:eas:ios
+      - task: mobile:testflight:submit
+
+  mobile:version:bump:
+    desc: increment iOS build number and Android versionCode
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - node scripts/bump-build.js
+
+  base:start:
+    desc: start new Expo/Metro preview app with tunnel
+    dir: '{{.BASE_DIR}}'
+    cmds:
+      - bunx expo start --tunnel
+
+  warp:dev:
+    desc: "start the new preview flow (alias: warp) with tunnel"
+    dir: '{{.BASE_DIR}}'
+    cmds:
+      - bun run warp:dev
+
+  base:web:
+    desc: start new Expo/Metro preview app for web
+    dir: '{{.BASE_DIR}}'
+    cmds:
+      - bunx expo start --web --tunnel
+
+  warp:web:
+    desc: "export static web preview bundle (alias: warp)"
+    dir: '{{.BASE_DIR}}'
+    cmds:
+      - bun run warp:web
+
+  install:web:
+    desc: install web dependencies
+    dir: '{{.WEB_DIR}}'
+    cmds:
+      - npm install
+
+  install:mobile:
+    desc: install mobile dependencies
+    dir: '{{.MOBILE_DIR}}'
+    cmds:
+      - npm install
+
+  install:base:
+    desc: install new Expo preview app dependencies
+    dir: '{{.BASE_DIR}}'
+    cmds:
+      - npm install
+
+  install:api:
+    desc: install API dependencies
+    dir: '{{.API_DIR}}'
+    cmds:
+      - npm install
+
+  install:backend:
+    desc: install backend dependencies (alias of install:api)
+    cmds:
+      - task: install:api
+
+  install:all:
+    desc: install all dependencies
+    cmds:
+      - task: install:web
+      - task: install:mobile
+      - task: install:base
+      - task: install:api
+
+  docker:build-expo:
+    desc: build the Expo/Metro toolchain image
+    cmds:
+      - docker build -f worker/Dockerfile.expo -t {{.DOCKER_IMAGE_EXPO}} .
+
+  docker:expo-shell:
+    desc: start a shell with the Expo toolchain (mounts repo)
+    cmds:
+      - docker run --rm -it -p 8081:8081 -p 19000:19000 -p 19001:19001 -v "$PWD":/workspace -w /workspace/worker/base {{.DOCKER_IMAGE_EXPO}}
+
+  docker:build-agent:
+    desc: build the agent runner image (codegen + tests + builds)
+    cmds:
+      - docker build -f worker/Dockerfile.agent -t {{.DOCKER_IMAGE_AGENT}} .
+
+  worker:build:
+    desc: build the worker image
+    cmds:
+      - docker build --no-cache -f worker/Dockerfile.agent -t {{.DOCKER_IMAGE_AGENT}} .
+
+  worker:run:
+    desc: run a local worker that polls the job queue and builds Expo web export
+    cmds:
+      - |
+        docker run --rm \
+          -e API_URL=${API_URL:-http://host.docker.internal:54321/functions/v1/api} \
+          --env-file worker/.env.local \
+          -e SUPABASE_BUCKET=${SUPABASE_BUCKET:-previews} \
+          -v "$PWD":/workspace \
+          -w /workspace \
+          {{.DOCKER_IMAGE_AGENT}} \
+          python /opt/worker/driver.py --env docker --workspace /workspace
+
+  worker:run:local:
+    desc: run worker in local mode (no API connection needed)
+    cmds:
+      - python worker/src/driver.py
+
+  worker:run:mock:
+    desc: run worker with mock agent (simulated, no LLM)
+    cmds:
+      - python worker/src/driver.py --agent-type mock
+
+  worker:test:
+    desc: run worker tests with pytest
+    dir: worker
+    cmds:
+      - pytest test/ -v
+
+  worker:test:agent:
+    desc: run worker tests with pytest
+    dir: worker
+    cmds:
+      - pytest test/ -v -k test_agent
+
+  worker:ctl:
+    desc: unified worker management (local, cluster, gke)
+    cmds:
+      - python scripts/eb {{.CLI_ARGS}}
+
+  worker:gke:setup:
+    desc: one-time GKE setup for worker (APIs, registry, cluster, KEDA)
+    cmds:
+      - gcloud config set project {{.GCP_PROJECT}}
+      - gcloud services enable artifactregistry.googleapis.com container.googleapis.com
+      - |
+          gcloud artifacts repositories describe {{.AR_REPO}} --location {{.GCP_REGION}} >/dev/null 2>&1 \
+            || gcloud artifacts repositories create {{.AR_REPO}} --repository-format=docker --location={{.GCP_REGION}}
+      - gcloud auth configure-docker {{.AR_HOST}}
+      - |
+          gcloud container clusters describe {{.GKE_CLUSTER}} --region {{.GCP_REGION}} >/dev/null 2>&1 \
+            || gcloud container clusters create-auto {{.GKE_CLUSTER}} --region {{.GCP_REGION}}
+      - gcloud container clusters get-credentials {{.GKE_CLUSTER}} --region {{.GCP_REGION}}
+      - kubectl apply --server-side --force-conflicts -f {{.KEDA_MANIFEST_URL}}
+
+  worker:gke:auth:
+    desc: set GCP project and kubecontext for GKE
+    cmds:
+      - gcloud config set project {{.GCP_PROJECT}}
+      - gcloud container clusters get-credentials {{.GKE_CLUSTER}} --region {{.GCP_REGION}}
+
+  worker:gke:login:
+    desc: sign in to a different gcloud account
+    cmds:
+      - gcloud auth login
+      - gcloud auth configure-docker {{.AR_HOST}}
+
+  worker:gke:build:
+    desc: build + push worker image to Artifact Registry
+    cmds:
+      - docker buildx build --platform linux/amd64 -f worker/Dockerfile.agent -t {{.WORKER_IMAGE_URI}} --push .
+
+  worker:gke:deploy:
+    desc: build/push image and apply worker manifests to GKE
+    cmds:
+      - task: worker:ctl
+        vars:
+          CLI_ARGS: 'gke deploy'
+
+  worker:gke:redeploy:
+    desc: rebuild/push and roll out updated worker image
+    cmds:
+      - task: worker:ctl
+        vars:
+          CLI_ARGS: 'gke deploy'
+
+  worker:gke:status:
+    desc: show worker pods and autoscaling status
+    cmds:
+      - task: worker:ctl
+        vars:
+          CLI_ARGS: 'gke status'
+
+  vercel:link:
+    desc: link web directory to correct Vercel project (eisberg)
+    dir: '{{.WEB_DIR}}'
+    cmds:
+      - bunx vercel link --project {{.VERCEL_PROJECT}} --yes
+
+  deploy:web:
+    desc: deploy web app to production (eisberg project)
+    dir: '{{.WEB_DIR}}'
+    cmds:
+      - task: vercel:link
+      - bunx vercel --prod --yes
+
+  deploy:backend:
+    desc: deploy backend/API to production (Supabase)
+    cmds:
+      - task: supabase:deploy
+
+  supabase:link:
+    desc: link local Supabase project to hosted project
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase link --project-ref {{.SUPABASE_PROJECT_REF}}
+
+  supabase:db:push:
+    desc: push database migrations to linked Supabase project
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase db push
+
+  supabase:functions:deploy:
+    desc: deploy edge functions to linked Supabase project
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase functions deploy api
+
+  supabase:deploy:
+    desc: deploy Supabase backend (migrations + functions)
+    dir: '{{.API_DIR}}'
+    cmds:
+      - task: supabase:db:push
+      - task: supabase:functions:deploy
+
+  deploy:mobile:
+    desc: deploy mobile app (skipped for now)
+    cmds:
+      - echo "mobile deployment skipped"
+
+  deploy:
+    desc: deploy web (Vercel) and backend (Supabase)
+    cmds:
+      - task: deploy:backend
+      - task: deploy:web
+
+  supabase:init:
+    desc: initialize Supabase project in API directory (run once)
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase init
+
+  supabase:start:
+    desc: start local Supabase emulator
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase start
+
+  supabase:stop:
+    desc: stop local Supabase emulator
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase stop
+
+  supabase:status:
+    desc: show Supabase emulator status and connection info
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase status
+
+  supabase:reset:
+    desc: reset Supabase database and apply schema (local)
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase db reset
+
+  supabase:reset-remote:
+    desc: 'reset remote Supabase database (WARNING: deletes all data)'
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase db reset --linked
+
+  supabase:studio:
+    desc: open Supabase Studio UI in browser
+    dir: '{{.API_DIR}}'
+    cmds:
+      - supabase studio

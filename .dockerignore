@@ -1,0 +1,10 @@
+**/__pycache__/
+**/*.pyc
+**/node_modules/
+**/.expo/
+**/.DS_Store
+**/dist/
+**/.turbo/
+**/.cache/
+**/build/
+.git/
