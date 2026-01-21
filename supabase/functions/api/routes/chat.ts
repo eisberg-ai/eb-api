@@ -5,6 +5,8 @@ import { queueJob } from "./job.ts";
 import { ensureProject, isProModel, setProjectStatus, validateModelStub } from "../lib/project.ts";
 import { callLLM } from "../lib/llm.ts";
 
+const MAX_STAGED_BUILDS = 3;
+
 async function generateTitleFromPrompt(prompt: string): Promise<string | null> {
   try {
     const response = await callLLM(
@@ -22,6 +24,24 @@ async function generateTitleFromPrompt(prompt: string): Promise<string | null> {
     console.error("failed to generate title", err);
   }
   return null;
+}
+
+async function getActiveBuildChain(projectId: string) {
+  /**
+   * Fetches the active build and any staged (pending with dependency) builds.
+   */
+  const { data: builds } = await admin
+    .from("builds")
+    .select("id, status, depends_on_build_id, created_at")
+    .eq("project_id", projectId)
+    .in("status", ["pending", "queued", "running"])
+    .order("created_at", { ascending: true });
+  if (!builds || builds.length === 0) return { activeBuild: null, stagedBuilds: [] };
+  // active build = pending/queued/running WITHOUT depends_on_build_id
+  const activeBuild = builds.find((b: any) => !b.depends_on_build_id) ?? null;
+  // staged builds = pending WITH depends_on_build_id
+  const stagedBuilds = builds.filter((b: any) => b.status === "pending" && b.depends_on_build_id);
+  return { activeBuild, stagedBuilds };
 }
 
 async function handlePostChat(req: Request, body: any) {
@@ -61,22 +81,16 @@ async function handlePostChat(req: Request, body: any) {
   }
   const nextVersionNumber = (Number((projectRow as any)?.current_version_number ?? 0) || 0) + 1;
   const buildWorkspaceId = body.workspace_id ?? (projectRow as any)?.workspace_id ?? null;
-  // check if last build failed - prevent new messages until resolved
+  // check build chain status - active build or staging builds
+  const { activeBuild, stagedBuilds } = await getActiveBuildChain(projectId);
+  // check if last completed build failed - prevent new messages until resolved
   const { data: lastBuild } = await admin
     .from("builds")
-    .select("id, status, metadata, error_code, error_message")
+    .select("id, status, metadata, error_code, error_message, depends_on_build_id")
     .eq("project_id", projectId)
     .order("created_at", { ascending: false })
     .limit(1)
     .single();
-  if (lastBuild?.status && ["pending", "queued", "running"].includes(lastBuild.status)) {
-    return json({
-      error: "build_in_progress",
-      message: "A build is currently in progress. Please wait for it to finish before sending new messages.",
-      last_build_id: lastBuild.id,
-      status: lastBuild.status,
-    }, 409);
-  }
   if (lastBuild?.status === "failed") {
     const errorCode = (lastBuild as any)?.error_code ?? (lastBuild.metadata as any)?.error;
     const errorMessage = (lastBuild as any)?.error_message ?? null;
@@ -88,6 +102,19 @@ async function handlePostChat(req: Request, body: any) {
       error_message: errorMessage,
     }, 400);
   }
+  // determine if this should be a staged build
+  const shouldStage = activeBuild !== null || stagedBuilds.length > 0;
+  if (shouldStage && stagedBuilds.length >= MAX_STAGED_BUILDS) {
+    return json({
+      error: "max_staged_builds",
+      message: `Maximum of ${MAX_STAGED_BUILDS} follow-up messages can be queued.`,
+      staged_count: stagedBuilds.length,
+    }, 409);
+  }
+  // find the build this should depend on (last in chain)
+  const dependsOnBuildId = shouldStage
+    ? (stagedBuilds.length > 0 ? stagedBuilds[stagedBuilds.length - 1].id : activeBuild?.id)
+    : null;
   // auto-generate project name on first message
   const { data: existingUserMessages } = await admin
     .from("messages")
@@ -147,21 +174,38 @@ async function handlePostChat(req: Request, body: any) {
       }
     }
   }
-  // create build with pending status
+  // create build - always starts as pending, with depends_on if staged
+  const buildMetadata = {
+    message_id: messageId,
+    retry_count: 0,
+    content: message,
+    attachments: body.attachments ?? null,
+  };
   const { error: buildErr } = await admin.from("builds").insert({
     id: buildId,
     project_id: projectId,
     version_number: nextVersionNumber,
     status: "pending",
-    metadata: { message_id: messageId, retry_count: 0 },
+    metadata: buildMetadata,
     model: messageModel,
     workspace_id: buildWorkspaceId,
     error_code: null,
     error_message: null,
     retry_of_build_id: null,
+    depends_on_build_id: dependsOnBuildId,
   });
   if (buildErr) return json({ error: buildErr.message }, 500);
-  // update project's latest build
+  // for staged builds (has dependency), return early without creating a job
+  if (shouldStage) {
+    return json({
+      ok: true,
+      staged: true,
+      message: { id: messageId, project_id: projectId, content: message },
+      build: { id: buildId, status: "pending", depends_on_build_id: dependsOnBuildId },
+      project_name: updatedProjectName,
+    });
+  }
+  // update project's latest build (only for non-staged builds)
   await admin.from("projects").update({ latest_build_id: buildId }).eq("id", projectId);
   // hard-block starting builds when user has 0 credits (API enforcement)
   const { data: balanceRow, error: balanceErr } = await admin

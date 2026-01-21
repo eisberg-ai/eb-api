@@ -248,6 +248,44 @@ async function handleGetChat(projectId: string) {
   return json({ messages });
 }
 
+async function handleGetStagedBuilds(req: Request, projectId: string) {
+  /**
+   * Fetches staged builds (pending with depends_on_build_id) for a project.
+   */
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  // verify project ownership
+  const { data: project } = await admin
+    .from("projects")
+    .select("owner_user_id")
+    .eq("id", projectId)
+    .single();
+  if (!project) return json({ error: "not found" }, 404);
+  if (project.owner_user_id !== user.id) return json({ error: "forbidden" }, 403);
+  // staged = pending builds with depends_on_build_id set
+  const { data: builds, error } = await admin
+    .from("builds")
+    .select("id, status, depends_on_build_id, metadata, model, created_at")
+    .eq("project_id", projectId)
+    .eq("status", "pending")
+    .not("depends_on_build_id", "is", null)
+    .order("created_at", { ascending: true });
+  if (error) return json({ error: error.message }, 500);
+  // map to response format with content preview
+  const staged = (builds ?? []).map((b: any) => {
+    const meta = (b.metadata as Record<string, any>) ?? {};
+    return {
+      id: b.id,
+      depends_on_build_id: b.depends_on_build_id,
+      content: meta.content ?? null,
+      attachments: meta.attachments ?? null,
+      model: b.model,
+      created_at: b.created_at,
+    };
+  });
+  return json({ staged_builds: staged });
+}
+
 async function handlePostMessage(req: Request, projectId: string, body: any) {
   const auth = await getUserOrService(req, { allowServiceKey: true });
   await ensureProject(projectId);
@@ -929,6 +967,10 @@ export async function handleProjects(req: Request, segments: string[], url: URL,
   // GET /projects/{id}/chat
   if (method === "GET" && segments[2] === "chat") {
     return handleGetChat(segments[1]);
+  }
+  // GET /projects/{id}/staged-builds
+  if (method === "GET" && segments[2] === "staged-builds") {
+    return handleGetStagedBuilds(req, segments[1]);
   }
   // POST /projects/{id}/messages
   if (method === "POST" && segments[2] === "messages") {

@@ -4,7 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
 SUPABASE_DIR="${REPO_ROOT}/api/supabase"
-TEST_FILE="${REPO_ROOT}/api/supabase/functions/api/tests/api_features.test.mjs"
+TESTS_DIR="${SCRIPT_DIR}"
+
+# allow running specific test file or all tests
+if [[ -n "${1:-}" ]]; then
+  TEST_FILE="${TESTS_DIR}/${1}"
+else
+  TEST_FILE="${TESTS_DIR}/*.test.mjs"
+fi
 
 started_here=0
 

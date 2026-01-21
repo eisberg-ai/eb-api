@@ -10,6 +10,66 @@ import { queueJob } from "./job.ts";
 type BuildStatus = "pending" | "queued" | "running" | "succeeded" | "failed";
 const MAX_RETRIES = 3;
 
+async function promoteNextStagedBuild(completedBuildId: string, projectId: string) {
+  /**
+   * When a build succeeds, find any pending build depending on it and queue it.
+   */
+  const { data: nextBuild, error: findErr } = await admin
+    .from("builds")
+    .select("*")
+    .eq("depends_on_build_id", completedBuildId)
+    .eq("status", "pending")
+    .order("created_at", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (findErr || !nextBuild) return null;
+  // extract payload from build metadata
+  const metadata = (nextBuild.metadata as Record<string, any>) ?? {};
+  const messageId = metadata.message_id ?? null;
+  const content = metadata.content ?? null;
+  const attachments = metadata.attachments ?? null;
+  if (!content) {
+    console.error("[staging] missing content in build metadata", { buildId: nextBuild.id });
+    return null;
+  }
+  // get project owner for job
+  const { data: project } = await admin
+    .from("projects")
+    .select("owner_user_id")
+    .eq("id", projectId)
+    .single();
+  if (!project) {
+    console.error("[staging] project not found", { projectId });
+    return null;
+  }
+  // create job and queue the build
+  try {
+    const job = await queueJob({
+      projectId,
+      buildId: nextBuild.id,
+      model: nextBuild.model ?? null,
+      workspaceId: nextBuild.workspace_id ?? null,
+      payload: { message_id: messageId, content, attachments },
+      ownerUserId: project.owner_user_id,
+    });
+    // update build to queued and set as latest
+    await admin.from("builds").update({ status: "queued" }).eq("id", nextBuild.id);
+    await admin.from("projects").update({ latest_build_id: nextBuild.id, status: "building" }).eq("id", projectId);
+    console.info("[staging] promoted build", { buildId: nextBuild.id, jobId: job.job_id });
+    return { build: nextBuild, job };
+  } catch (err) {
+    console.error("[staging] failed to queue build", { buildId: nextBuild.id, error: err });
+    // mark the staging build as failed
+    await admin.from("builds").update({
+      status: "failed",
+      error_code: "staging_promotion_failed",
+      error_message: (err as Error).message,
+      ended_at: new Date().toISOString(),
+    }).eq("id", nextBuild.id);
+    return null;
+  }
+}
+
 async function handlePostBuild(body: any) {
   const buildId = (body.id ?? `build-${Date.now()}`).toString();
   const projectId = body.project_id as string;
@@ -116,9 +176,9 @@ async function handlePatchBuild(buildId: string, body: any) {
     const projectStatus: ProjectStatus = updates.status === "succeeded" ? "active" : "failed";
     await setProjectStatus(build.project_id, projectStatus);
   }
-  if (updates.status === "failed") {
-    // build error details are persisted on the build row (error_code/error_message)
-    // and surfaced to clients via the build endpoint (no extra chat message).
+  // when build succeeds, check for and promote any staged builds
+  if (updates.status === "succeeded") {
+    await promoteNextStagedBuild(buildId, build.project_id);
   }
   if (body.status === "succeeded" && (body.is_promoted || body.promote)) {
     try {
@@ -174,6 +234,51 @@ async function handlePostBuildSteps(body: any) {
   const { error } = await admin.from("build_steps").upsert(step);
   if (error) return json({ error: error.message }, 500);
   return json({ ok: true });
+}
+
+async function handleDeleteStagedBuild(req: Request, buildId: string) {
+  /**
+   * Deletes a staged build and repairs the dependency chain.
+   */
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  // get the build
+  const { data: build, error: buildErr } = await admin
+    .from("builds")
+    .select("id, project_id, status, depends_on_build_id, metadata")
+    .eq("id", buildId)
+    .single();
+  if (buildErr || !build) return json({ error: "Build not found" }, 404);
+  // verify it's a staged build (pending with depends_on)
+  if (build.status !== "pending" || !build.depends_on_build_id) {
+    return json({ error: "can_only_delete_staged", message: "Can only delete staged builds" }, 400);
+  }
+  // verify ownership
+  const { data: project } = await admin
+    .from("projects")
+    .select("owner_user_id")
+    .eq("id", build.project_id)
+    .single();
+  if (!project || project.owner_user_id !== user.id) {
+    return json({ error: "forbidden" }, 403);
+  }
+  // repair chain: any build depending on this one should now depend on this build's dependency
+  const { error: repairErr } = await admin
+    .from("builds")
+    .update({ depends_on_build_id: build.depends_on_build_id })
+    .eq("depends_on_build_id", buildId);
+  if (repairErr) {
+    console.error("[builds] chain repair failed", { buildId, error: repairErr });
+  }
+  // also delete the associated message if it exists
+  const messageId = (build.metadata as any)?.message_id;
+  if (messageId) {
+    await admin.from("messages").delete().eq("id", messageId);
+  }
+  // delete the build
+  const { error: deleteErr } = await admin.from("builds").delete().eq("id", buildId);
+  if (deleteErr) return json({ error: deleteErr.message }, 500);
+  return json({ ok: true, deleted_build_id: buildId });
 }
 
 async function handleGetBuildByJobId(jobId: string) {
@@ -391,6 +496,10 @@ export async function handleBuilds(req: Request, segments: string[], url: URL, b
   // POST /builds/{id}/retry
   if (method === "POST" && segments[0] === "builds" && segments[2] === "retry") {
     return handlePostBuildRetry(req, segments[1], body);
+  }
+  // DELETE /builds/{id}/staged
+  if (method === "DELETE" && segments[0] === "builds" && segments[2] === "staged") {
+    return handleDeleteStagedBuild(req, segments[1]);
   }
   // PATCH /builds/{id}/tasks
   if (method === "PATCH" && segments[0] === "builds" && segments[2] === "tasks") {
