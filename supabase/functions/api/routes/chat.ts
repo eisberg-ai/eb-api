@@ -4,6 +4,7 @@ import { getUserOrService } from "../lib/auth.ts";
 import { ensureProject, isProModel, setProjectStatus, validateModelStub } from "../lib/project.ts";
 import { callLLM } from "../lib/llm.ts";
 import { startVm } from "../lib/vm.ts";
+import { upsertSystemMessage } from "../lib/messages.ts";
 
 const MAX_STAGED_BUILDS = 3;
 
@@ -253,6 +254,16 @@ async function handlePostChat(req: Request, body: any) {
     await setProjectStatus(projectId, "failed");
     return json({ error: "insufficient_balance", build: { id: buildId, status: "failed" }, balance }, 402);
   }
+  const acquiringMessageId = `vm-acquiring-${buildId}`;
+  const acquiringErr = await upsertSystemMessage({
+    id: acquiringMessageId,
+    projectId,
+    buildId,
+    content: "Acquiring agent VM...",
+  });
+  if (acquiringErr) {
+    console.warn("[chat] failed to insert VM acquiring message", { projectId, buildId, error: acquiringErr.message });
+  }
   // start vm build
   try {
     const { vm } = await startVm({
@@ -261,6 +272,16 @@ async function handlePostChat(req: Request, body: any) {
       buildId,
       agentType: defaultAgentVersion,
     });
+    const acquiredMessageId = `vm-acquired-${buildId}`;
+    const acquiredErr = await upsertSystemMessage({
+      id: acquiredMessageId,
+      projectId,
+      buildId,
+      content: "...Agent VM acquired",
+    });
+    if (acquiredErr) {
+      console.warn("[chat] failed to insert VM acquired message", { projectId, buildId, error: acquiredErr.message });
+    }
     // update build to queued
     await admin.from("builds").update({ status: "queued" }).eq("id", buildId);
     await setProjectStatus(projectId, "building");

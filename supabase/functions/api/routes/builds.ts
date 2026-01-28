@@ -6,6 +6,7 @@ import { getUserOrService } from "../lib/auth.ts";
 import { parseBuildErrorCode } from "../lib/buildErrors.ts";
 import { normalizeErrorMessage } from "../lib/buildFailure.ts";
 import { startVm } from "../lib/vm.ts";
+import { upsertSystemMessage } from "../lib/messages.ts";
 
 type BuildStatus = "pending" | "queued" | "running" | "succeeded" | "failed";
 const MAX_RETRIES = 3;
@@ -34,12 +35,30 @@ async function promoteNextStagedBuild(completedBuildId: string, projectId: strin
   }
   // start vm build
   try {
+    const acquiringErr = await upsertSystemMessage({
+      id: `vm-acquiring-${nextBuild.id}`,
+      projectId,
+      buildId: nextBuild.id,
+      content: "Acquiring agent VM...",
+    });
+    if (acquiringErr) {
+      console.warn("[staging] failed to insert VM acquiring message", { projectId, buildId: nextBuild.id, error: acquiringErr.message });
+    }
     const { vm } = await startVm({
       projectId,
       mode: "building",
       buildId: nextBuild.id,
       agentType: nextBuild.agent_version ?? defaultAgentVersion,
     });
+    const acquiredErr = await upsertSystemMessage({
+      id: `vm-acquired-${nextBuild.id}`,
+      projectId,
+      buildId: nextBuild.id,
+      content: "...Agent VM acquired",
+    });
+    if (acquiredErr) {
+      console.warn("[staging] failed to insert VM acquired message", { projectId, buildId: nextBuild.id, error: acquiredErr.message });
+    }
     // update build to queued and set as latest
     await admin.from("builds").update({ status: "queued" }).eq("id", nextBuild.id);
     await admin.from("projects").update({ latest_build_id: nextBuild.id, status: "building" }).eq("id", projectId);
@@ -541,12 +560,30 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
   await admin.from("projects").update({ latest_build_id: newBuildId }).eq("id", build.project_id);
 
   try {
+    const acquiringErr = await upsertSystemMessage({
+      id: `vm-acquiring-${newBuildId}`,
+      projectId: build.project_id,
+      buildId: newBuildId,
+      content: "Acquiring agent VM...",
+    });
+    if (acquiringErr) {
+      console.warn("[builds] failed to insert VM acquiring message", { projectId: build.project_id, buildId: newBuildId, error: acquiringErr.message });
+    }
     const { vm } = await startVm({
       projectId: build.project_id,
       mode: "building",
       buildId: newBuildId,
       agentType: resolvedAgentVersion,
     });
+    const acquiredErr = await upsertSystemMessage({
+      id: `vm-acquired-${newBuildId}`,
+      projectId: build.project_id,
+      buildId: newBuildId,
+      content: "...Agent VM acquired",
+    });
+    if (acquiredErr) {
+      console.warn("[builds] failed to insert VM acquired message", { projectId: build.project_id, buildId: newBuildId, error: acquiredErr.message });
+    }
     await setProjectStatus(build.project_id, "building");
     await admin.from("builds").update({ status: "queued" }).eq("id", newBuildId);
     return json({
