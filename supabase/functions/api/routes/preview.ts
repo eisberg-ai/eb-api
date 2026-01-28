@@ -1,5 +1,6 @@
-import { awsClient, r2PreviewBucket, r2Endpoint, r2PreviewPublicBase } from "../lib/env.ts";
+import { admin, awsClient, r2PreviewBucket, r2Endpoint, r2PreviewPublicBase } from "../lib/env.ts";
 import { rewriteHtmlForSubpath } from "../lib/response.ts";
+import { startVm } from "../lib/vm.ts";
 
 const PREVIEW_CSP = [
   "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'",
@@ -144,9 +145,96 @@ function getPreviewRootBaseHref(req: Request, url: URL, projectId: string, versi
   return root;
 }
 
+function parseBuildPreviewSegments(segments: string[]) {
+  if (segments.length < 2) return null;
+  if (segments[1]?.startsWith("build-")) {
+    return { buildId: segments[1], restSegments: segments.slice(2) };
+  }
+  if (segments[1] === "build" && segments[2]) {
+    return { buildId: segments[2], restSegments: segments.slice(3) };
+  }
+  return null;
+}
+
+async function handleBuildPreview(req: Request, segments: string[], url: URL) {
+  const parsed = parseBuildPreviewSegments(segments);
+  if (!parsed) return null;
+  const { buildId, restSegments } = parsed;
+  const restPath = restSegments.length === 0 ? "index.html" : restSegments.join("/");
+  const isHtmlPath = restPath.toLowerCase().endsWith(".html");
+  const { data: build, error } = await admin
+    .from("builds")
+    .select("id, artifacts")
+    .eq("id", buildId)
+    .maybeSingle();
+  if (error || !build) {
+    return new Response("build not found", {
+      status: 404,
+      headers: buildPreviewHeaders("text/plain", false, { branch: "vm-not-found", restPath }),
+    });
+  }
+  const webUrl = (build.artifacts as any)?.web as string | undefined;
+  if (!webUrl) {
+    return new Response("preview not available", {
+      status: 404,
+      headers: buildPreviewHeaders("text/plain", false, { branch: "vm-missing-preview", restPath }),
+    });
+  }
+  let upstream: URL;
+  try {
+    const base = new URL(webUrl);
+    const basePath = base.pathname.replace(/\/+$/, "") + "/";
+    upstream = new URL(basePath + restPath, `${base.protocol}//${base.host}`);
+  } catch (_e) {
+    return new Response("invalid preview url", {
+      status: 400,
+      headers: buildPreviewHeaders("text/plain", false, { branch: "vm-invalid-url", restPath }),
+    });
+  }
+  const upstreamResp = await fetch(upstream.toString(), { redirect: "follow" });
+  const contentType = upstreamResp.headers.get("Content-Type") || "";
+  if (!upstreamResp.ok) {
+    return new Response(`preview fetch failed (${upstreamResp.status})`, {
+      status: upstreamResp.status,
+      headers: buildPreviewHeaders("text/plain", false, {
+        branch: "vm-upstream-error",
+        restPath,
+        upstreamType: contentType || undefined,
+      }),
+    });
+  }
+  if (contentType.includes("text/html") || isHtmlPath) {
+    const html = await upstreamResp.text();
+    const baseHref = getRequestBaseHref(req, url);
+    const rewritten = rewriteHtmlForSubpath(html, baseHref);
+    return new Response(rewritten, {
+      status: 200,
+      headers: buildPreviewHeaders("text/html; charset=utf-8", true, {
+        branch: "vm-html",
+        restPath,
+        upstreamType: contentType || undefined,
+      }),
+    });
+  }
+  const body = await upstreamResp.arrayBuffer();
+  return new Response(body, {
+    status: 200,
+    headers: buildPreviewHeaders(contentType || undefined, false, {
+      branch: "vm-binary",
+      restPath,
+      upstreamType: contentType || undefined,
+    }),
+  });
+}
+
 async function handleGetPreview(req: Request, segments: string[], url: URL) {
   const projectId = segments[1];
   const version = segments[2];
+  try {
+    await startVm({ projectId, mode: "serving" });
+  } catch (err) {
+    console.error("[preview] failed to start vm", { projectId, error: err });
+  }
   const restSegments = segments.slice(3);
   const restPath = restSegments.length === 0 ? "index.html" : restSegments.join("/");
   const isHtmlPath = restPath.toLowerCase().endsWith(".html");
@@ -345,6 +433,8 @@ async function handleGetPreview(req: Request, segments: string[], url: URL) {
 
 export async function handlePreview(req: Request, segments: string[], url: URL, _body: any) {
   if (segments[0] !== "preview" && segments[0] !== "preview-remote") return null;
+  const buildPreview = await handleBuildPreview(req, segments, url);
+  if (buildPreview) return buildPreview;
   // GET /preview/{projectId}/{version}/...
   return handleGetPreview(req, segments, url);
 }

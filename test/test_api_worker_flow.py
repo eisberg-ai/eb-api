@@ -1,5 +1,5 @@
 """
-Integration flow that mirrors web/mobile: sign up, post chat, verify queued job.
+Integration flow that mirrors web/mobile: sign up, post chat, verify VM start.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def build_urls(env: dict[str, str]) -> tuple[str, str]:
 
 
 @pytest.mark.integration
-def test_chat_creates_job_flow() -> None:
+def test_chat_creates_vm_flow() -> None:
     env = resolve_env()
     service_key = env.get("SUPABASE_SERVICE_ROLE_KEY")
     if not service_key:
@@ -56,13 +56,16 @@ def test_chat_creates_job_flow() -> None:
     assert chat_resp.status_code == 200, chat_resp.text
     chat_data = chat_resp.json()
     assert chat_data.get("ok") is True, chat_data
-    job_id = (chat_data.get("job") or {}).get("job_id")
-    assert job_id, "chat response missing job_id"
+    build_id = (chat_data.get("build") or {}).get("id")
+    assert build_id, "chat response missing build id"
+    vm = chat_data.get("vm") or {}
+    assert vm.get("mode") == "building"
 
-    jobs_resp = requests.get(
-        f"{api_url}/worker/jobs?projectId={project_id}",
+    vm_resp = requests.get(
+        f"{api_url}/vms/{project_id}",
+        headers={"Authorization": f"Bearer {access_token}"},
         timeout=10,
     )
-    assert jobs_resp.status_code == 200, jobs_resp.text
-    jobs = jobs_resp.json().get("jobs", [])
-    assert any(job.get("job_id") == job_id for job in jobs), "queued job not visible"
+    assert vm_resp.status_code == 200, vm_resp.text
+    vm_data = vm_resp.json().get("vm", {})
+    assert vm_data.get("mode") == "building"

@@ -1,11 +1,11 @@
 import { json } from "../lib/response.ts";
-import { admin } from "../lib/env.ts";
+import { admin, defaultAgentVersion } from "../lib/env.ts";
 import { ensureProject, setProjectStatus, type ProjectStatus } from "../lib/project.ts";
 import { promoteBuild } from "../lib/build.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { parseBuildErrorCode } from "../lib/buildErrors.ts";
 import { normalizeErrorMessage } from "../lib/buildFailure.ts";
-import { queueJob } from "./job.ts";
+import { startVm } from "../lib/vm.ts";
 
 type BuildStatus = "pending" | "queued" | "running" | "succeeded" | "failed";
 const MAX_RETRIES = 3;
@@ -32,31 +32,19 @@ async function promoteNextStagedBuild(completedBuildId: string, projectId: strin
     console.error("[staging] missing content in build metadata", { buildId: nextBuild.id });
     return null;
   }
-  // get project owner for job
-  const { data: project } = await admin
-    .from("projects")
-    .select("owner_user_id")
-    .eq("id", projectId)
-    .single();
-  if (!project) {
-    console.error("[staging] project not found", { projectId });
-    return null;
-  }
-  // create job and queue the build
+  // start vm build
   try {
-    const job = await queueJob({
+    const { vm } = await startVm({
       projectId,
+      mode: "building",
       buildId: nextBuild.id,
-      model: nextBuild.model ?? null,
-      workspaceId: nextBuild.workspace_id ?? null,
-      payload: { message_id: messageId, content, attachments },
-      ownerUserId: project.owner_user_id,
+      agentType: nextBuild.agent_version ?? defaultAgentVersion,
     });
     // update build to queued and set as latest
     await admin.from("builds").update({ status: "queued" }).eq("id", nextBuild.id);
     await admin.from("projects").update({ latest_build_id: nextBuild.id, status: "building" }).eq("id", projectId);
-    console.info("[staging] promoted build", { buildId: nextBuild.id, jobId: job.job_id });
-    return { build: nextBuild, job };
+    console.info("[staging] promoted build", { buildId: nextBuild.id, vmId: vm.id });
+    return { build: nextBuild, vm };
   } catch (err) {
     console.error("[staging] failed to queue build", { buildId: nextBuild.id, error: err });
     // mark the staging build as failed
@@ -86,6 +74,7 @@ async function handlePostBuild(body: any) {
     artifacts: body.artifacts ?? null,
     started_at: body.started_at ?? new Date().toISOString(),
     model,
+    agent_version: body.agent_version ?? defaultAgentVersion,
     workspace_id: body.workspace_id ?? null,
     error_code: body.error_code ?? null,
     error_message: body.error_message ?? null,
@@ -105,6 +94,7 @@ async function handlePostBuild(body: any) {
     started_at: data.started_at,
     ended_at: data.ended_at,
     model: data.model,
+    agent_version: data.agent_version,
     workspace_id: data.workspace_id,
     error_code: data.error_code ?? null,
     error_message: data.error_message ?? null,
@@ -222,7 +212,12 @@ async function handlePostWorkerVersion(req: Request, body: any) {
     .single();
   let buildId = build?.id ?? `build-${projectId}-${version}`;
   if (!build) {
-    await admin.from("builds").insert({ id: buildId, project_id: projectId, status: "succeeded" });
+    await admin.from("builds").insert({
+      id: buildId,
+      project_id: projectId,
+      status: "succeeded",
+      agent_version: defaultAgentVersion,
+    });
   }
   const artifacts = webPreviewUrl ? { web: webPreviewUrl, mobile: body.mobile_preview_url ?? webPreviewUrl } : null;
   await promoteBuild(projectId, buildId, version, artifacts ?? undefined);
@@ -279,6 +274,99 @@ async function handleDeleteStagedBuild(req: Request, buildId: string) {
   const { error: deleteErr } = await admin.from("builds").delete().eq("id", buildId);
   if (deleteErr) return json({ error: deleteErr.message }, 500);
   return json({ ok: true, deleted_build_id: buildId });
+}
+
+async function handlePatchStagedBuild(req: Request, buildId: string, body: any) {
+  /**
+   * Updates a staged build's content/attachments while still pending.
+   */
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const contentRaw = body?.content ?? body?.message ?? body?.text ?? "";
+  const content = typeof contentRaw === "string" ? contentRaw.trim() : "";
+  const hasAttachments = Object.prototype.hasOwnProperty.call(body ?? {}, "attachments");
+  if (!content) {
+    return json({ error: "content_required", message: "Content required" }, 400);
+  }
+  const { data: build, error: buildErr } = await admin
+    .from("builds")
+    .select("id, project_id, status, depends_on_build_id, metadata")
+    .eq("id", buildId)
+    .single();
+  if (buildErr || !build) return json({ error: "Build not found" }, 404);
+  if (build.status !== "pending" || !build.depends_on_build_id) {
+    return json({ error: "staged_locked", message: "Staged build is already processing" }, 409);
+  }
+  const { data: project } = await admin
+    .from("projects")
+    .select("owner_user_id")
+    .eq("id", build.project_id)
+    .single();
+  if (!project) return json({ error: "not found" }, 404);
+  const metadata = (build.metadata as Record<string, any>) ?? {};
+  const messageId = metadata.message_id ?? null;
+  let isAuthor = false;
+  if (messageId) {
+    const { data: message } = await admin
+      .from("messages")
+      .select("user_id")
+      .eq("id", messageId)
+      .maybeSingle();
+    isAuthor = message?.user_id === user.id;
+  }
+  if (project.owner_user_id !== user.id && !isAuthor) {
+    return json({ error: "forbidden" }, 403);
+  }
+  const nextAttachments = hasAttachments ? (body.attachments ?? null) : (metadata.attachments ?? null);
+  const nextMetadata = { ...metadata, content, attachments: nextAttachments };
+  const { data: updatedBuild, error: updateErr } = await admin
+    .from("builds")
+    .update({ metadata: nextMetadata })
+    .eq("id", buildId)
+    .eq("status", "pending")
+    .not("depends_on_build_id", "is", null)
+    .select("id, depends_on_build_id, metadata")
+    .maybeSingle();
+  if (updateErr) return json({ error: updateErr.message }, 500);
+  if (!updatedBuild) {
+    return json({ error: "staged_locked", message: "Staged build is already processing" }, 409);
+  }
+  if (messageId) {
+    const messageUpdates: Record<string, unknown> = { content };
+    if (hasAttachments) {
+      messageUpdates.attachments = nextAttachments;
+    }
+    const { error: messageErr } = await admin
+      .from("messages")
+      .update(messageUpdates)
+      .eq("id", messageId);
+    if (messageErr) {
+      console.error("[staging] failed to update message content", { messageId, error: messageErr });
+    }
+  }
+  if (nextAttachments?.services && Array.isArray(nextAttachments.services)) {
+    for (const service of nextAttachments.services) {
+      if (!service?.stub) continue;
+      const { error: serviceError } = await admin
+        .from("project_services")
+        .upsert(
+          { project_id: build.project_id, service_stub: service.stub, config: service.config || null },
+          { onConflict: "project_id,service_stub" }
+        );
+      if (serviceError) {
+        console.error("error enabling service:", service.stub, serviceError);
+      }
+    }
+  }
+  return json({
+    ok: true,
+    build: {
+      id: updatedBuild.id,
+      depends_on_build_id: updatedBuild.depends_on_build_id,
+      content: (updatedBuild.metadata as any)?.content ?? content,
+      attachments: (updatedBuild.metadata as any)?.attachments ?? nextAttachments,
+    },
+  });
 }
 
 async function handleGetBuildByJobId(jobId: string) {
@@ -431,6 +519,7 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
   const updatedMetadata = { ...metadata, retry_count: retryCount + 1 };
   if (resolvedMessageId) updatedMetadata.message_id = resolvedMessageId;
   const resolvedModel = build.model ?? resolvedMessage?.model ?? null;
+  const resolvedAgentVersion = build.agent_version ?? defaultAgentVersion;
   const { error: insertErr } = await admin.from("builds").insert({
     id: newBuildId,
     project_id: build.project_id,
@@ -440,6 +529,7 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
     artifacts: null,
     metadata: updatedMetadata,
     model: resolvedModel,
+    agent_version: resolvedAgentVersion,
     workspace_id: build.workspace_id ?? null,
     retry_of_build_id: rootBuildId,
     error_code: null,
@@ -451,19 +541,18 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
   await admin.from("projects").update({ latest_build_id: newBuildId }).eq("id", build.project_id);
 
   try {
-    const job = await queueJob({
+    const { vm } = await startVm({
       projectId: build.project_id,
+      mode: "building",
       buildId: newBuildId,
-      model: resolvedModel,
-      workspaceId: build.workspace_id ?? null,
-      payload: resolvedPayload,
-      ownerUserId: user.id,
+      agentType: resolvedAgentVersion,
     });
+    await setProjectStatus(build.project_id, "building");
     await admin.from("builds").update({ status: "queued" }).eq("id", newBuildId);
     return json({
       ok: true,
       build: { id: newBuildId, status: "queued", retry_count: retryCount + 1, retry_of_build_id: rootBuildId },
-      job,
+      vm: { id: vm.id, mode: vm.mode, runtime_state: vm.runtime_state },
     });
   } catch (err) {
     const errorMsg = (err as Error).message;
@@ -496,6 +585,10 @@ export async function handleBuilds(req: Request, segments: string[], url: URL, b
   // POST /builds/{id}/retry
   if (method === "POST" && segments[0] === "builds" && segments[2] === "retry") {
     return handlePostBuildRetry(req, segments[1], body);
+  }
+  // PATCH /builds/{id}/staged
+  if (method === "PATCH" && segments[0] === "builds" && segments[2] === "staged") {
+    return handlePatchStagedBuild(req, segments[1], body);
   }
   // DELETE /builds/{id}/staged
   if (method === "DELETE" && segments[0] === "builds" && segments[2] === "staged") {

@@ -1,5 +1,5 @@
 import { json } from "../lib/response.ts";
-import { admin } from "../lib/env.ts";
+import { admin, defaultAgentVersion } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { nextJob, queueJob } from "./job.ts";
 import { setProjectStatus } from "../lib/project.ts";
@@ -16,6 +16,7 @@ async function handlePostWorkerJobs(req: Request, body: any) {
     version_number: 1,
     status: "pending",
     metadata: { retry_count: 0 },
+    agent_version: defaultAgentVersion,
     error_code: null,
     error_message: null,
     retry_of_build_id: null,

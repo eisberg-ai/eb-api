@@ -1,5 +1,5 @@
 import { json } from "../lib/response.ts";
-import { admin } from "../lib/env.ts";
+import { admin, defaultAgentVersion } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { ensureProject, getCurrentWorkspaceId, DEFAULT_MODEL, isProModel, normalizeProjectStatus, validateModelStub } from "../lib/project.ts";
 import { callLLM } from "../lib/llm.ts";
@@ -234,6 +234,7 @@ async function handlePostVersionSource(projectId: string, versionId: number, bod
       is_promoted: true,
       source,
       source_encoding: encoding,
+      agent_version: defaultAgentVersion,
     });
   }
   return json({ ok: true });
@@ -690,9 +691,11 @@ async function handleCleanupDraftProjects(req: Request, body: any) {
 }
 
 async function handleGetProject(req: Request, projectId: string) {
-  const { user } = await getUserOrService(req);
-  if (!user) return json({ error: "unauthorized" }, 401);
-  const payload = await buildProjectPayload(projectId, user.id);
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  const isService = auth.service;
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  const payload = await buildProjectPayload(projectId, user?.id);
   if (!payload) return json({ error: "not found" }, 404);
   return json(payload);
 }

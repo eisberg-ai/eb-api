@@ -383,8 +383,18 @@ async function handleUserApproval(user: any, userId: string, body: any) {
 
 function resolveAdminTab(raw: string | null): string {
   const tab = (raw ?? "").toLowerCase();
-  const allowed = new Set(["projects", "builds", "jobs", "users", "credits", "invites", "promo-codes"]);
+  const allowed = new Set(["projects", "builds", "jobs", "users", "credits", "invites", "promo-codes", "cluster"]);
   return allowed.has(tab) ? tab : "projects";
+}
+
+async function getClusterData(limit: number, offset: number) {
+  const { data, error, count } = await admin
+    .from("vms")
+    .select("id,project_id,instance_id,base_url,status,runtime_state,desired_build_id,lease_owner,lease_expires_at,last_heartbeat_at,created_at,updated_at", { count: "exact" })
+    .order("last_heartbeat_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (error) throw error;
+  return { rows: data ?? [], total: count ?? 0 };
 }
 
 async function getTabData(tab: string, limit: number, offset: number) {
@@ -393,6 +403,8 @@ async function getTabData(tab: string, limit: number, offset: number) {
       return await getBuildsData(limit, offset);
     case "jobs":
       return await getJobsData(limit, offset);
+    case "cluster":
+      return await getClusterData(limit, offset);
     case "users":
       return await getUsersData(limit, offset);
     case "credits":

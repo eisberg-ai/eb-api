@@ -51,6 +51,7 @@ const defaultSuccessUrl = Deno.env.get("BILLING_SUCCESS_URL") ?? undefined;
 const defaultCancelUrl = Deno.env.get("BILLING_CANCEL_URL") ?? defaultSuccessUrl;
 const publishSecretKey = Deno.env.get("PUBLISH_SECRET_KEY") ?? "";
 const publishSecretKeyId = Deno.env.get("PUBLISH_SECRET_KEY_ID") ?? "default";
+const defaultAgentVersion = Deno.env.get("DEFAULT_AGENT_VERSION") ?? "sonic_2e";
 
 export {
   admin,
@@ -67,4 +68,5 @@ export {
   supabaseKey,
   publishSecretKey,
   publishSecretKeyId,
+  defaultAgentVersion,
 };

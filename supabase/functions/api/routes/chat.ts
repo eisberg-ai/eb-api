@@ -1,9 +1,9 @@
 import { json } from "../lib/response.ts";
-import { admin } from "../lib/env.ts";
+import { admin, defaultAgentVersion } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
-import { queueJob } from "./job.ts";
 import { ensureProject, isProModel, setProjectStatus, validateModelStub } from "../lib/project.ts";
 import { callLLM } from "../lib/llm.ts";
+import { startVm } from "../lib/vm.ts";
 
 const MAX_STAGED_BUILDS = 3;
 
@@ -155,8 +155,32 @@ async function handlePostChat(req: Request, body: any) {
       { onConflict: "id" },
     );
   if (msgErr) {
-    console.error("[chat] insert message error", { projectId, messageId, error: msgErr });
-    return json({ error: msgErr.message }, 500);
+    if (msgErr.message?.includes("ON CONFLICT")) {
+      const { error: insertErr } = await admin
+        .from("messages")
+        .insert(
+          {
+            id: messageId,
+            project_id: projectId,
+            job_id: body.job_id ?? null,
+            type: "user",
+            content: message,
+            metadata: null,
+            attachments: body.attachments ?? null,
+            model: messageModel,
+            user_id: userId,
+          },
+        );
+      if (!insertErr) {
+        console.warn("[chat] message upsert failed, fallback insert succeeded", { projectId, messageId });
+      } else {
+        console.error("[chat] insert message error", { projectId, messageId, error: insertErr });
+        return json({ error: insertErr.message }, 500);
+      }
+    } else {
+      console.error("[chat] insert message error", { projectId, messageId, error: msgErr });
+      return json({ error: msgErr.message }, 500);
+    }
   }
   // enable services from attachments
   if (body.attachments?.services && Array.isArray(body.attachments.services)) {
@@ -188,6 +212,7 @@ async function handlePostChat(req: Request, body: any) {
     status: "pending",
     metadata: buildMetadata,
     model: messageModel,
+    agent_version: defaultAgentVersion,
     workspace_id: buildWorkspaceId,
     error_code: null,
     error_message: null,
@@ -201,7 +226,7 @@ async function handlePostChat(req: Request, body: any) {
       ok: true,
       staged: true,
       message: { id: messageId, project_id: projectId, content: message },
-      build: { id: buildId, status: "pending", depends_on_build_id: dependsOnBuildId },
+      build: { id: buildId, status: "pending", depends_on_build_id: dependsOnBuildId, agent_version: defaultAgentVersion },
       project_name: updatedProjectName,
     });
   }
@@ -228,24 +253,22 @@ async function handlePostChat(req: Request, body: any) {
     await setProjectStatus(projectId, "failed");
     return json({ error: "insufficient_balance", build: { id: buildId, status: "failed" }, balance }, 402);
   }
-  // queue job
+  // start vm build
   try {
-    const job = await queueJob({
+    const { vm } = await startVm({
       projectId,
+      mode: "building",
       buildId,
-      jobId: body.job_id,
-      model: messageModel ?? null,
-      workspaceId: body.workspace_id ?? null,
-      payload: body.payload ?? { message_id: messageId, content: message, attachments: body.attachments ?? null },
-      ownerUserId: user.id,
+      agentType: defaultAgentVersion,
     });
     // update build to queued
     await admin.from("builds").update({ status: "queued" }).eq("id", buildId);
+    await setProjectStatus(projectId, "building");
     return json({
       ok: true,
       message: { id: messageId, project_id: projectId, content: message },
-      build: { id: buildId, status: "queued" },
-      job,
+      build: { id: buildId, status: "queued", agent_version: defaultAgentVersion },
+      vm: { id: vm.id, mode: vm.mode, runtime_state: vm.runtime_state },
       project_name: updatedProjectName,
     });
   } catch (err) {

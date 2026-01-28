@@ -1,325 +1,87 @@
 version: '3'
 
-vars:
-  WEB_DIR: web
-  MOBILE_DIR: mobile
-  BASE_DIR: worker/base
-  API_DIR: api
-  BACKEND_DIR: api
-  DOCKER_IMAGE_EXPO: eisberg-expo
-  DOCKER_IMAGE_AGENT: eisberg-agent
-  VERCEL_PROJECT: eisberg
-  GCP_PROJECT: eisberg-ai
-  GCP_REGION: us-central1
-  GKE_CLUSTER: eisberg-workers
-  AR_REPO: eisberg
-  WORKER_IMAGE_NAME: worker
-  WORKER_IMAGE_TAG:
-    sh: date +%Y%m%d%H%M%S
-  AR_HOST: '{{.GCP_REGION}}-docker.pkg.dev'
-  WORKER_IMAGE_URI: '{{.AR_HOST}}/{{.GCP_PROJECT}}/{{.AR_REPO}}/{{.WORKER_IMAGE_NAME}}:{{.WORKER_IMAGE_TAG}}'
-  KEDA_VERSION: 2.14.1
-  KEDA_MANIFEST_URL: 'https://github.com/kedacore/keda/releases/download/v{{.KEDA_VERSION}}/keda-{{.KEDA_VERSION}}.yaml'
-
 tasks:
   default:
     desc: show available tasks
     cmds:
       - task --list
 
-  # TODO: "setup" task
-
-  init:
-    desc: initialize the project
+  start:
+    desc: start the API local server
     cmds:
-      - conda activate eisberg
+      - supabase start
 
-  web:dev:
-    desc: start web development server
-    dir: '{{.WEB_DIR}}'
+  serve:
+    desc: serve the API functions locally
     cmds:
-      - npm run dev
+      - supabase functions serve api --no-verify-jwt
 
-  web:build:
-    desc: build web app for production
-    dir: '{{.WEB_DIR}}'
+  dev:local:
+    desc: start local Supabase and serve the API functions
     cmds:
-      - npm run build
+      - supabase start
+      - supabase functions serve api --no-verify-jwt
 
-  web:start:
-    desc: start web production server
-    dir: '{{.WEB_DIR}}'
+  deploy:
+    desc: deploy API to production (Supabase)
     cmds:
-      - npm run start
-
-  web:lint:
-    desc: lint web app
-    dir: '{{.WEB_DIR}}'
-    cmds:
-      - npm run lint
-
-  api:dev:
-    desc: start API development server
-    dir: '{{.API_DIR}}'
-    cmds:
-      - npm run dev
-
-  api:build:
-    desc: build API for production
-    dir: '{{.API_DIR}}'
-    cmds:
-      - npm run build
-
-  api:start:
-    desc: start API production server
-    dir: '{{.API_DIR}}'
-    cmds:
-      - npm run start
-
-  # Backwards compatibility aliases
-  backend:dev:
-    desc: start backend development server (alias of api:dev)
-    cmds:
-      - task: api:dev
-
-  backend:build:
-    desc: build backend for production (alias of api:build)
-    cmds:
-      - task: api:build
-
-  backend:start:
-    desc: start backend production server (alias of api:start)
-    cmds:
-      - task: api:start
-
-  mobile:start:
-    desc: start mobile expo dev server
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - npm run start
-
-  mobile:ios:
-    desc: start mobile app on iOS simulator
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - npm run ios
-
-  mobile:ios:release:
-    desc: run iOS simulator using Release build + production env
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - EXPO_PUBLIC_BACKEND_ENV=remote EXPO_PUBLIC_AUTH_ENV=remote npm run ios -- --configuration Release
-
-  mobile:prebuild:clean:
-    desc: regenerate native iOS/Android projects (cleans and re-autolinks modules)
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - npx expo prebuild --clean
-
-  mobile:pods:install:
-    desc: install iOS pods after prebuild
-    dir: '{{.MOBILE_DIR}}/ios'
-    cmds:
-      - pod install
-
-  mobile:prepare:native:
-    desc: refresh native projects and pods after adding native deps
-    cmds:
-      - task: mobile:prebuild:clean
-      - task: mobile:pods:install
-
-  mobile:android:
-    desc: start mobile app on Android emulator
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - npm run android
-
-  mobile:web:
-    desc: start mobile app in web browser
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - npm run web
-
-  mobile:eas:ios:
-    desc: build an iOS release via EAS (used for TestFlight)
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - node scripts/bump-build.js
-      - bunx eas build --platform ios --profile production --non-interactive
-
-  mobile:testflight:submit:
-    desc: upload the latest EAS iOS build to TestFlight
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - bunx eas submit --platform ios --profile production --latest --non-interactive
-
-  mobile:deploy:
-    desc: build and submit the latest iOS build to TestFlight
-    cmds:
-      - task: mobile:prepare:native
-      - task: mobile:eas:ios
-      - task: mobile:testflight:submit
-
-  mobile:version:bump:
-    desc: increment iOS build number and Android versionCode
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - node scripts/bump-build.js
-
-  base:start:
-    desc: start new Expo/Metro preview app with tunnel
-    dir: '{{.BASE_DIR}}'
-    cmds:
-      - bunx expo start --tunnel
-
-  warp:dev:
-    desc: "start the new preview flow (alias: warp) with tunnel"
-    dir: '{{.BASE_DIR}}'
-    cmds:
-      - bun run warp:dev
-
-  base:web:
-    desc: start new Expo/Metro preview app for web
-    dir: '{{.BASE_DIR}}'
-    cmds:
-      - bunx expo start --web --tunnel
-
-  warp:web:
-    desc: "export static web preview bundle (alias: warp)"
-    dir: '{{.BASE_DIR}}'
-    cmds:
-      - bun run warp:web
-
-  install:web:
-    desc: install web dependencies
-    dir: '{{.WEB_DIR}}'
-    cmds:
-      - npm install
-
-  install:mobile:
-    desc: install mobile dependencies
-    dir: '{{.MOBILE_DIR}}'
-    cmds:
-      - npm install
-
-  install:base:
-    desc: install new Expo preview app dependencies
-    dir: '{{.BASE_DIR}}'
-    cmds:
-      - npm install
-
-  install:api:
-    desc: install API dependencies
-    dir: '{{.API_DIR}}'
-    cmds:
-      - npm install
-
-  install:backend:
-    desc: install backend dependencies (alias of install:api)
-    cmds:
-      - task: install:api
-
-  install:all:
-    desc: install all dependencies
-    cmds:
-      - task: install:web
-      - task: install:mobile
-      - task: install:base
-      - task: install:api
-
-
-  vercel:link:
-    desc: link web directory to correct Vercel project (eisberg)
-    dir: '{{.WEB_DIR}}'
-    cmds:
-      - bunx vercel link --project {{.VERCEL_PROJECT}} --yes
-
-  deploy:web:
-    desc: deploy web app to production (eisberg project)
-    dir: '{{.WEB_DIR}}'
-    cmds:
-      - task: vercel:link
-      - bunx vercel --prod --yes
-
-  deploy:backend:
-    desc: deploy backend/API to production (Supabase)
-    cmds:
+      - supabase secrets set --env-file .env.prod
       - task: supabase:deploy
+
+  ###
 
   supabase:link:
     desc: link local Supabase project to hosted project
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase link --project-ref {{.SUPABASE_PROJECT_REF}}
 
   supabase:db:push:
     desc: push database migrations to linked Supabase project
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase db push
 
   supabase:functions:deploy:
     desc: deploy edge functions to linked Supabase project
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase functions deploy api
 
   supabase:deploy:
     desc: deploy Supabase backend (migrations + functions)
-    dir: '{{.API_DIR}}'
     cmds:
       - task: supabase:db:push
       - task: supabase:functions:deploy
 
-  deploy:mobile:
-    desc: deploy mobile app (skipped for now)
-    cmds:
-      - echo "mobile deployment skipped"
-
-  deploy:
-    desc: deploy web (Vercel) and backend (Supabase)
-    cmds:
-      - task: deploy:backend
-      - task: deploy:web
-
   supabase:init:
-    desc: initialize Supabase project in API directory (run once)
-    dir: '{{.API_DIR}}'
+    desc: initialize Supabase project (run once)
     cmds:
       - supabase init
 
   supabase:start:
     desc: start local Supabase emulator
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase start
 
   supabase:stop:
     desc: stop local Supabase emulator
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase stop
 
   supabase:status:
     desc: show Supabase emulator status and connection info
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase status
 
   supabase:reset:
     desc: reset Supabase database and apply schema (local)
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase db reset
 
   supabase:reset-remote:
     desc: 'reset remote Supabase database (WARNING: deletes all data)'
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase db reset --linked
 
   supabase:studio:
     desc: open Supabase Studio UI in browser
-    dir: '{{.API_DIR}}'
     cmds:
       - supabase studio

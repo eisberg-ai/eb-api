@@ -330,3 +330,95 @@ def test_failed_build_blocks_new_messages() -> None:
     assert resp.status_code == 400, 'should block new messages after failed build'
     data = resp.json()
     assert data.get('error') == 'build_failed'
+
+
+@pytest.mark.integration
+def test_edit_staged_build_updates_content() -> None:
+    """
+    test editing a staged build updates its content.
+    """
+    service_key = get_service_key()
+    if not service_key:
+        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
+    api_url = get_api_url()
+    access_token = create_test_user(api_url, service_key)
+    project_id = f'project-edit-staging-{uuid.uuid4().hex[:8]}'
+    # first message
+    requests.post(
+        f'{api_url}/chat',
+        json={'project_id': project_id, 'message': 'build a todo app', 'model': 'claude-sonnet-4-5'},
+        headers={'Authorization': f'Bearer {access_token}'},
+        timeout=15,
+    )
+    # staged message
+    staged_resp = requests.post(
+        f'{api_url}/chat',
+        json={'project_id': project_id, 'message': 'add dark mode', 'model': 'claude-sonnet-4-5'},
+        headers={'Authorization': f'Bearer {access_token}'},
+        timeout=15,
+    )
+    staged_build_id = staged_resp.json()['build']['id']
+    update_resp = requests.patch(
+        f'{api_url}/builds/{staged_build_id}/staged',
+        json={'content': 'add a light theme instead'},
+        headers={'Authorization': f'Bearer {access_token}'},
+        timeout=15,
+    )
+    assert update_resp.status_code == 200, update_resp.text
+    # verify staged build content updated
+    staged_list = requests.get(
+        f'{api_url}/projects/{project_id}/staged-builds',
+        headers={'Authorization': f'Bearer {access_token}'},
+        timeout=15,
+    )
+    assert staged_list.status_code == 200, staged_list.text
+    staged_builds = staged_list.json()['staged_builds']
+    assert len(staged_builds) == 1
+    assert staged_builds[0]['content'] == 'add a light theme instead'
+
+
+@pytest.mark.integration
+def test_edit_staged_build_locked_after_promotion() -> None:
+    """
+    test editing a staged build fails once it starts processing.
+    """
+    service_key = get_service_key()
+    if not service_key:
+        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
+    api_url = get_api_url()
+    access_token = create_test_user(api_url, service_key)
+    project_id = f'project-edit-locked-{uuid.uuid4().hex[:8]}'
+    # first message
+    first_resp = requests.post(
+        f'{api_url}/chat',
+        json={'project_id': project_id, 'message': 'build a todo app', 'model': 'claude-sonnet-4-5'},
+        headers={'Authorization': f'Bearer {access_token}'},
+        timeout=15,
+    )
+    first_build_id = first_resp.json()['build']['id']
+    # staged message
+    staged_resp = requests.post(
+        f'{api_url}/chat',
+        json={'project_id': project_id, 'message': 'add dark mode', 'model': 'claude-sonnet-4-5'},
+        headers={'Authorization': f'Bearer {access_token}'},
+        timeout=15,
+    )
+    staged_build_id = staged_resp.json()['build']['id']
+    # promote staged build by completing first build
+    promote_resp = requests.patch(
+        f'{api_url}/builds/{first_build_id}',
+        json={'status': 'succeeded'},
+        headers={'Authorization': f'Bearer {service_key}'},
+        timeout=15,
+    )
+    assert promote_resp.status_code == 200, promote_resp.text
+    time.sleep(0.2)
+    update_resp = requests.patch(
+        f'{api_url}/builds/{staged_build_id}/staged',
+        json={'content': 'add new onboarding'},
+        headers={'Authorization': f'Bearer {access_token}'},
+        timeout=15,
+    )
+    assert update_resp.status_code == 409, update_resp.text
+    data = update_resp.json()
+    assert data.get('error') == 'staged_locked'
