@@ -33,6 +33,7 @@ SUPABASE_KEEP_RUNNING=1 ./run_local_api_tests.sh
 
 - `api_features.test.mjs` - tests for invites, promo codes, and access control
 - `message_staging.test.mjs` - tests for message staging/queueing feature
+- `userland_isolation.test.mjs` - tests userland app isolation via shared auth
 
 ## writing tests
 

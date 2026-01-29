@@ -47,7 +47,12 @@ alter table public.messages add column if not exists model_level text check (mod
 alter table public.messages add column if not exists model_alias text;
 alter table public.messages add column if not exists agent_version text;
 
-alter table public.build_steps add column if not exists workspace_id uuid;
+do $$
+begin
+  if to_regclass('public.build_steps') is not null then
+    alter table public.build_steps add column if not exists workspace_id uuid;
+  end if;
+end $$;
 
 alter table public.env_vars add column if not exists workspace_id uuid;
 
@@ -171,10 +176,12 @@ begin
   end if;
 
   -- build_steps
-  if not exists (select 1 from pg_policies where schemaname='public' and tablename='build_steps' and policyname='build_steps_rw') then
-    create policy build_steps_rw on public.build_steps
-      using (public.is_project_member(project_id))
-      with check (public.is_project_member(project_id));
+  if to_regclass('public.build_steps') is not null then
+    if not exists (select 1 from pg_policies where schemaname='public' and tablename='build_steps' and policyname='build_steps_rw') then
+      create policy build_steps_rw on public.build_steps
+        using (public.is_project_member(project_id))
+        with check (public.is_project_member(project_id));
+    end if;
   end if;
 
   -- messages

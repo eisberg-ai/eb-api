@@ -51,7 +51,19 @@ const defaultSuccessUrl = Deno.env.get("BILLING_SUCCESS_URL") ?? undefined;
 const defaultCancelUrl = Deno.env.get("BILLING_CANCEL_URL") ?? defaultSuccessUrl;
 const publishSecretKey = Deno.env.get("PUBLISH_SECRET_KEY") ?? "";
 const publishSecretKeyId = Deno.env.get("PUBLISH_SECRET_KEY_ID") ?? "default";
-const defaultAgentVersion = Deno.env.get("DEFAULT_AGENT_VERSION") ?? "sonic_2e";
+const defaultAgentVersion = Deno.env.get("DEFAULT_AGENT_VERSION") ?? "sonic_2d";
+
+/** Public API base URL for service proxy links. Prefer PUBLIC_API_URL env; else derive from request. */
+function getApiBaseUrl(req?: Request): string {
+  const fromEnv = Deno.env.get("PUBLIC_API_URL");
+  if (fromEnv && fromEnv.trim()) return fromEnv.replace(/\/+$/, "");
+  if (!req) return "";
+  const u = new URL(req.url);
+  const parts = u.pathname.split("/");
+  const idx = parts.findIndex((p) => ["worker", "services", "projects"].includes(p));
+  const prefix = idx >= 0 ? parts.slice(0, idx).join("/") : u.pathname;
+  return (u.origin + prefix).replace(/\/+$/, "");
+}
 
 export {
   admin,
@@ -69,4 +81,5 @@ export {
   publishSecretKey,
   publishSecretKeyId,
   defaultAgentVersion,
+  getApiBaseUrl,
 };

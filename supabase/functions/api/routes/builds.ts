@@ -7,9 +7,22 @@ import { parseBuildErrorCode } from "../lib/buildErrors.ts";
 import { normalizeErrorMessage } from "../lib/buildFailure.ts";
 import { startVm } from "../lib/vm.ts";
 import { upsertSystemMessage } from "../lib/messages.ts";
+import { generateVmAcquiredMessage } from "../lib/vmMessages.ts";
 
 type BuildStatus = "pending" | "queued" | "running" | "succeeded" | "failed";
 const MAX_RETRIES = 3;
+
+function extractMessageText(content: any): string {
+  if (!Array.isArray(content)) return "";
+  const parts = content.map((block) => {
+    if (!block || typeof block !== "object") return "";
+    if (block.kind === "text" || block.kind === "code") {
+      return typeof block.text === "string" ? block.text : "";
+    }
+    return "";
+  });
+  return parts.filter(Boolean).join("\n").trim();
+}
 
 async function promoteNextStagedBuild(completedBuildId: string, projectId: string) {
   /**
@@ -40,6 +53,7 @@ async function promoteNextStagedBuild(completedBuildId: string, projectId: strin
       projectId,
       buildId: nextBuild.id,
       content: "Acquiring agent VM...",
+      type: "vm",
     });
     if (acquiringErr) {
       console.warn("[staging] failed to insert VM acquiring message", { projectId, buildId: nextBuild.id, error: acquiringErr.message });
@@ -50,14 +64,20 @@ async function promoteNextStagedBuild(completedBuildId: string, projectId: strin
       buildId: nextBuild.id,
       agentType: nextBuild.agent_version ?? defaultAgentVersion,
     });
-    const acquiredErr = await upsertSystemMessage({
-      id: `vm-acquired-${nextBuild.id}`,
-      projectId,
-      buildId: nextBuild.id,
-      content: "...Agent VM acquired",
-    });
-    if (acquiredErr) {
-      console.warn("[staging] failed to insert VM acquired message", { projectId, buildId: nextBuild.id, error: acquiredErr.message });
+    try {
+      const acquiredText = await generateVmAcquiredMessage();
+      const acquiredErr = await upsertSystemMessage({
+        id: `vm-acquired-${nextBuild.id}`,
+        projectId,
+        buildId: nextBuild.id,
+        content: acquiredText,
+        type: "vm",
+      });
+      if (acquiredErr) {
+        console.warn("[staging] failed to insert VM acquired message", { projectId, buildId: nextBuild.id, error: acquiredErr.message });
+      }
+    } catch (err) {
+      console.warn("[staging] failed to generate VM acquired message", { projectId, buildId: nextBuild.id, error: err });
     }
     // update build to queued and set as latest
     await admin.from("builds").update({ status: "queued" }).eq("id", nextBuild.id);
@@ -89,7 +109,6 @@ async function handlePostBuild(body: any) {
     job_id: body.job_id ?? null,
     version_number: vnum,
     status: (body.status as BuildStatus) ?? "queued",
-    tasks: body.tasks ?? [],
     artifacts: body.artifacts ?? null,
     started_at: body.started_at ?? new Date().toISOString(),
     model,
@@ -108,7 +127,6 @@ async function handlePostBuild(body: any) {
     job_id: data.job_id,
     version_id: data.version_number ?? vnum,
     status: data.status,
-    tasks: data.tasks ?? [],
     artifacts: data.artifacts ?? null,
     started_at: data.started_at,
     ended_at: data.ended_at,
@@ -130,7 +148,6 @@ async function handleGetBuild(buildId: string) {
     job_id: data.job_id,
     version_id: data.version_number,
     status: data.status,
-    tasks: data.tasks ?? [],
     artifacts: data.artifacts ?? null,
     metadata: data.metadata ?? null,
     started_at: data.started_at,
@@ -144,11 +161,8 @@ async function handleGetBuild(buildId: string) {
   });
 }
 
-async function handlePatchBuildTasks(buildId: string, body: any) {
-  const tasks = body.tasks;
-  const { error } = await admin.from("builds").update({ tasks }).eq("id", buildId);
-  if (error) return json({ error: error.message }, 500);
-  return json({ ok: true });
+async function handlePatchBuildTasks(_buildId: string, _body: any) {
+  return json({ error: "build tasks are now stored in messages" }, 400);
 }
 
 async function handlePatchBuild(buildId: string, body: any) {
@@ -157,7 +171,6 @@ async function handlePatchBuild(buildId: string, body: any) {
   if (body.ended_at || body.endedAt) updates.ended_at = body.ended_at ?? body.endedAt;
   if (body.started_at || body.startedAt) updates.started_at = body.started_at ?? body.startedAt;
   if (body.artifacts) updates.artifacts = body.artifacts;
-  if (body.tasks) updates.tasks = body.tasks;
   if (body.job_id !== undefined) updates.job_id = body.job_id;
   if (body.agent_version !== undefined) updates.agent_version = body.agent_version;
   if (body.metadata !== undefined) updates.metadata = body.metadata;
@@ -205,7 +218,6 @@ async function handlePatchBuild(buildId: string, body: any) {
     job_id: data.job_id,
     version_id: data.version_number,
     status: data.status,
-    tasks: data.tasks ?? [],
     artifacts: data.artifacts ?? null,
     started_at: data.started_at,
     ended_at: data.ended_at,
@@ -244,10 +256,7 @@ async function handlePostWorkerVersion(req: Request, body: any) {
 }
 
 async function handlePostBuildSteps(body: any) {
-  const step = body;
-  const { error } = await admin.from("build_steps").upsert(step);
-  if (error) return json({ error: error.message }, 500);
-  return json({ ok: true });
+  return json({ error: "build steps are now stored in messages" }, 400);
 }
 
 async function handleDeleteStagedBuild(req: Request, buildId: string) {
@@ -302,7 +311,9 @@ async function handlePatchStagedBuild(req: Request, buildId: string, body: any) 
   const { user } = await getUserOrService(req);
   if (!user) return json({ error: "unauthorized" }, 401);
   const contentRaw = body?.content ?? body?.message ?? body?.text ?? "";
-  const content = typeof contentRaw === "string" ? contentRaw.trim() : "";
+  const content = Array.isArray(contentRaw)
+    ? extractMessageText(contentRaw)
+    : (typeof contentRaw === "string" ? contentRaw.trim() : "");
   const hasAttachments = Object.prototype.hasOwnProperty.call(body ?? {}, "attachments");
   if (!content) {
     return json({ error: "content_required", message: "Content required" }, 400);
@@ -324,16 +335,7 @@ async function handlePatchStagedBuild(req: Request, buildId: string, body: any) 
   if (!project) return json({ error: "not found" }, 404);
   const metadata = (build.metadata as Record<string, any>) ?? {};
   const messageId = metadata.message_id ?? null;
-  let isAuthor = false;
-  if (messageId) {
-    const { data: message } = await admin
-      .from("messages")
-      .select("user_id")
-      .eq("id", messageId)
-      .maybeSingle();
-    isAuthor = message?.user_id === user.id;
-  }
-  if (project.owner_user_id !== user.id && !isAuthor) {
+  if (project.owner_user_id !== user.id) {
     return json({ error: "forbidden" }, 403);
   }
   const nextAttachments = hasAttachments ? (body.attachments ?? null) : (metadata.attachments ?? null);
@@ -351,7 +353,7 @@ async function handlePatchStagedBuild(req: Request, buildId: string, body: any) 
     return json({ error: "staged_locked", message: "Staged build is already processing" }, 409);
   }
   if (messageId) {
-    const messageUpdates: Record<string, unknown> = { content };
+    const messageUpdates: Record<string, unknown> = { content: [{ kind: "text", text: content }] };
     if (hasAttachments) {
       messageUpdates.attachments = nextAttachments;
     }
@@ -403,7 +405,6 @@ async function handleGetBuildByJobId(jobId: string) {
     job_id: data.job_id,
     version_id: data.version_number,
     status: data.status,
-    tasks: data.tasks ?? [],
     artifacts: data.artifacts ?? null,
     metadata: data.metadata ?? null,
     started_at: data.started_at,
@@ -482,7 +483,7 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
     messageId = (jobPayload.message_id ?? jobPayload.messageId ?? null) as string | null;
   }
 
-  let messageRow: { id: string; content: string | null; attachments: any; model: string | null } | null = null;
+  let messageRow: { id: string; content: any; attachments: any; model: string | null } | null = null;
   if (messageId) {
     const { data: row, error: msgErr } = await admin
       .from("messages")
@@ -493,13 +494,13 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
     messageRow = row ?? null;
   }
 
-  let fallbackMessage: { id: string; content: string | null; attachments: any; model: string | null } | null = null;
+  let fallbackMessage: { id: string; content: any; attachments: any; model: string | null } | null = null;
   if (!messageRow) {
     const { data: lastMessage, error: lastMsgErr } = await admin
       .from("messages")
       .select("id, content, attachments, model")
       .eq("project_id", build.project_id)
-      .eq("type", "user")
+      .eq("role", "user")
       .order("sequence_number", { ascending: false })
       .limit(1)
       .maybeSingle();
@@ -514,7 +515,7 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
     if (resolvedMessage) {
       return {
         message_id: resolvedMessage.id,
-        content: resolvedMessage.content,
+        content: extractMessageText(resolvedMessage.content),
         attachments: resolvedMessage.attachments ?? null,
       };
     }
@@ -523,6 +524,13 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
   })();
   if (!resolvedPayload) {
     return json({ error: "message_context_missing", message: "This build cannot be retried (missing message context)" }, 400);
+  }
+  const rawRetryContent = resolvedPayload.content ?? resolvedPayload.message ?? resolvedPayload.text ?? "";
+  const retryContent = Array.isArray(rawRetryContent)
+    ? extractMessageText(rawRetryContent)
+    : (typeof rawRetryContent === "string" ? rawRetryContent.trim() : "");
+  if (!retryContent) {
+    return json({ error: "prompt_required", message: "Retry requires a non-empty user prompt." }, 400);
   }
   if (!resolvedPayload.content && resolvedPayload.message) {
     resolvedPayload.content = resolvedPayload.message;
@@ -535,8 +543,11 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
   }
 
   const newBuildId = `build-${Date.now()}`;
-  const updatedMetadata = { ...metadata, retry_count: retryCount + 1 };
+  const updatedMetadata = { ...metadata, retry_count: retryCount + 1, content: retryContent };
   if (resolvedMessageId) updatedMetadata.message_id = resolvedMessageId;
+  if (resolvedPayload.attachments !== undefined) {
+    updatedMetadata.attachments = resolvedPayload.attachments;
+  }
   const resolvedModel = build.model ?? resolvedMessage?.model ?? null;
   const resolvedAgentVersion = build.agent_version ?? defaultAgentVersion;
   const { error: insertErr } = await admin.from("builds").insert({
@@ -544,7 +555,6 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
     project_id: build.project_id,
     version_number: build.version_number,
     status: "pending",
-    tasks: [],
     artifacts: null,
     metadata: updatedMetadata,
     model: resolvedModel,
@@ -565,6 +575,7 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
       projectId: build.project_id,
       buildId: newBuildId,
       content: "Acquiring agent VM...",
+      type: "vm",
     });
     if (acquiringErr) {
       console.warn("[builds] failed to insert VM acquiring message", { projectId: build.project_id, buildId: newBuildId, error: acquiringErr.message });
@@ -575,14 +586,20 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
       buildId: newBuildId,
       agentType: resolvedAgentVersion,
     });
-    const acquiredErr = await upsertSystemMessage({
-      id: `vm-acquired-${newBuildId}`,
-      projectId: build.project_id,
-      buildId: newBuildId,
-      content: "...Agent VM acquired",
-    });
-    if (acquiredErr) {
-      console.warn("[builds] failed to insert VM acquired message", { projectId: build.project_id, buildId: newBuildId, error: acquiredErr.message });
+    try {
+      const acquiredText = await generateVmAcquiredMessage();
+      const acquiredErr = await upsertSystemMessage({
+        id: `vm-acquired-${newBuildId}`,
+        projectId: build.project_id,
+        buildId: newBuildId,
+        content: acquiredText,
+        type: "vm",
+      });
+      if (acquiredErr) {
+        console.warn("[builds] failed to insert VM acquired message", { projectId: build.project_id, buildId: newBuildId, error: acquiredErr.message });
+      }
+    } catch (err) {
+      console.warn("[builds] failed to generate VM acquired message", { projectId: build.project_id, buildId: newBuildId, error: err });
     }
     await setProjectStatus(build.project_id, "building");
     await admin.from("builds").update({ status: "queued" }).eq("id", newBuildId);

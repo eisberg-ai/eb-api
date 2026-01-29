@@ -1,27 +1,88 @@
 import { json } from "../lib/response.ts";
-import { admin, defaultAgentVersion } from "../lib/env.ts";
+import { admin, defaultAgentVersion, getApiBaseUrl } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { nextJob, queueJob } from "./job.ts";
 import { setProjectStatus } from "../lib/project.ts";
+
+const SERVICE_TYPE_TEXT = "text";
+
+function enrichAttachmentsWithEndpoints(attachments: any, apiBaseUrl: string, projectId: string): any {
+  if (!attachments?.services || !Array.isArray(attachments.services) || !apiBaseUrl || !projectId) return attachments;
+  const services = attachments.services.map((s: any) => {
+    const stub = s?.stub;
+    const existing = s?.endpoint ?? s?.proxy_endpoint ?? s?.url;
+    if (!stub) return s;
+    return {
+      ...s,
+      endpoint: existing ?? `${apiBaseUrl}/services/${SERVICE_TYPE_TEXT}/${stub}?projectId=${projectId}`,
+    };
+  });
+  return { ...attachments, services };
+}
 
 async function handlePostWorkerJobs(req: Request, body: any) {
   const { user } = await getUserOrService(req);
   if (!user) return json({ error: "unauthorized" }, 401);
   const projectId = (body.project_id ?? body.projectId ?? "project-alpha").toString();
   const buildId = body.build_id ?? body.buildId ?? `build-${Date.now()}`;
+  const payloadInput = body.payload ?? null;
+  const payloadMessageRaw =
+    body.message
+    ?? (payloadInput && typeof payloadInput === "object" ? (payloadInput as Record<string, unknown>).message : null)
+    ?? (payloadInput && typeof payloadInput === "object" ? (payloadInput as Record<string, unknown>).content : null)
+    ?? (payloadInput && typeof payloadInput === "object" ? (payloadInput as Record<string, unknown>).text : null);
+  const payloadMessage = typeof payloadMessageRaw === "string" ? payloadMessageRaw.trim() : "";
+  if (!payloadMessage) {
+    return json({ error: "message required" }, 400);
+  }
+  const messageId = (body.message_id
+    ?? (payloadInput && typeof payloadInput === "object" ? (payloadInput as Record<string, unknown>).message_id : null)
+    ?? crypto.randomUUID()).toString();
+  const attachments =
+    body.attachments
+    ?? (payloadInput && typeof payloadInput === "object" ? (payloadInput as Record<string, unknown>).attachments : null)
+    ?? null;
+  let payload: Record<string, unknown> = {};
+  if (payloadInput && typeof payloadInput === "object" && !Array.isArray(payloadInput)) {
+    payload = { ...payloadInput } as Record<string, unknown>;
+  }
+  payload.message_id = messageId;
+  if (!payload.message && !payload.content && !payload.text) {
+    payload.message = payloadMessage;
+  }
+  if (attachments && payload.attachments === undefined) {
+    payload.attachments = attachments;
+  }
   // create build with pending status
   const { error: buildErr } = await admin.from("builds").insert({
     id: buildId,
     project_id: projectId,
     version_number: 1,
     status: "pending",
-    metadata: { retry_count: 0 },
+    metadata: { retry_count: 0, message_id: messageId, content: payloadMessage, attachments },
     agent_version: defaultAgentVersion,
     error_code: null,
     error_message: null,
     retry_of_build_id: null,
   });
   if (buildErr) return json({ error: buildErr.message }, 500);
+  const { error: msgErr } = await admin.from("messages").upsert(
+    {
+      id: messageId,
+      project_id: projectId,
+      build_id: buildId,
+      role: "user",
+      type: "talk",
+      content: [{ kind: "text", text: payloadMessage }],
+      attachments,
+      model: body.model ?? null,
+    },
+    { onConflict: "id" },
+  );
+  if (msgErr) {
+    await admin.from("builds").delete().eq("id", buildId);
+    return json({ error: msgErr.message }, 500);
+  }
   // update project's latest build
   await admin.from("projects").update({ latest_build_id: buildId }).eq("id", projectId);
   // queue job
@@ -32,7 +93,7 @@ async function handlePostWorkerJobs(req: Request, body: any) {
       jobId: (body.job_id ?? body.jobId ?? `job-${Date.now()}`).toString(),
       model: body.model ?? null,
       workspaceId: body.workspace_id ?? body.workspaceId ?? null,
-      payload: body.payload ?? null,
+      payload,
       ownerUserId: user.id,
     });
     await admin.from("builds").update({ status: "queued" }).eq("id", buildId);
@@ -43,7 +104,7 @@ async function handlePostWorkerJobs(req: Request, body: any) {
       status: "failed",
       error_code: "worker_error",
       error_message: errorMsg,
-      metadata: { retry_count: 0 },
+      metadata: { retry_count: 0, message_id: messageId, content: payloadMessage, attachments },
       ended_at: new Date().toISOString(),
     }).eq("id", buildId);
     return json({ error: errorMsg, build: { id: buildId, status: "failed" } }, 500);
@@ -129,14 +190,6 @@ async function handleGetWorkerJobProject(req: Request, jobId: string) {
     console.error("[workerJobs] messages query error", msgErr);
   }
   const visibleMessages = (messages ?? []).filter((m: any) => typeof m.id !== "string" || !m.id.startsWith("build-error-"));
-  const { data: buildsForProject, error: buildsErr } = await admin.from("builds").select("id,tasks").eq("project_id", job.project_id);
-  if (buildsErr) {
-    console.error("[workerJobs] builds query error", buildsErr);
-  }
-  const tasksByBuild: Record<string, any[]> = {};
-  (buildsForProject ?? []).forEach((b: any) => {
-    if (b?.id && Array.isArray(b.tasks)) tasksByBuild[b.id] = b.tasks;
-  });
   const { data: versions, error: versionsErr } = await admin
     .from("builds")
     .select("version_number, artifacts")
@@ -146,10 +199,11 @@ async function handleGetWorkerJobProject(req: Request, jobId: string) {
   if (versionsErr) {
     console.error("[workerJobs] versions query error", versionsErr);
   }
+  const apiBaseUrl = getApiBaseUrl(req);
   console.log("[workerJobs] response summary", {
     projectId: project.id,
     messages: visibleMessages.length,
-    builds: (buildsForProject ?? []).length,
+    builds: 0,
     versions: (versions ?? []).length,
   });
   return json({
@@ -167,9 +221,7 @@ async function handleGetWorkerJobProject(req: Request, jobId: string) {
     owner_user_id: project.owner_user_id ?? null,
     chat_history: visibleMessages.map((m: any) => ({
       ...m,
-      type: m.type === "build" || m.type === "system" ? "action" : m.type,
-      tasks: Array.isArray((m as any).tasks) ? (m as any).tasks : (m.build_id && tasksByBuild[m.build_id]) || [],
-      attachments: m.attachments ?? null,
+      attachments: enrichAttachmentsWithEndpoints(m.attachments ?? null, apiBaseUrl, project.id),
     })),
     versions: (versions ?? []).map((v) => ({
       id: v.version_number,

@@ -5,19 +5,19 @@ type SystemMessageInput = {
   projectId: string;
   buildId?: string | null;
   content: string;
-  metadata?: Record<string, unknown> | null;
+  type?: string | null;
 };
 
 export async function upsertSystemMessage(input: SystemMessageInput) {
-  const { id, projectId, buildId, content, metadata } = input;
+  const { id, projectId, buildId, content, type } = input;
   const { error } = await admin.from("messages").upsert(
     {
       id,
       project_id: projectId,
       build_id: buildId ?? null,
-      type: "system",
-      content,
-      metadata: metadata ?? null,
+      role: "agent",
+      type: type ?? "status",
+      content: [{ kind: "text", text: content }],
     },
     { onConflict: "id" },
   );

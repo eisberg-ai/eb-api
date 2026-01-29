@@ -1,5 +1,5 @@
 import { json } from "../lib/response.ts";
-import { admin, defaultAgentVersion } from "../lib/env.ts";
+import { admin, defaultAgentVersion, getApiBaseUrl } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { ensureProject, getCurrentWorkspaceId, DEFAULT_MODEL, isProModel, normalizeProjectStatus, validateModelStub } from "../lib/project.ts";
 import { callLLM } from "../lib/llm.ts";
@@ -37,20 +37,21 @@ async function handleGetVersions(req: Request, segments: string[], url: URL) {
   const { data: project } = await admin.from("projects").select("current_version_number").eq("id", projectId).single();
   const { data: messages } = await admin
     .from("messages")
-    .select("id, type, content, created_at")
+    .select("id, role, type, content, created_at")
     .eq("project_id", projectId)
     .order("created_at", { ascending: true });
   const buildsWithMessages = (builds ?? []).map((b: any) => {
     const buildCreatedAt = new Date(b.created_at);
     const buildMessages = (messages ?? []).filter((m: any) => new Date(m.created_at) <= buildCreatedAt);
-    const lastUserMessage = [...buildMessages].reverse().find((m: any) => m.type === "user");
+    const lastUserMessage = [...buildMessages].reverse().find((m: any) => m.role === "user");
+    const descriptionText = extractMessageText(lastUserMessage?.content);
     return {
       build_id: b.id,
       version_number: b.version_number,
       is_promoted: b.is_promoted ?? false,
       status: b.status ?? null,
       created_at: b.created_at,
-      description: lastUserMessage?.content || `Build ${b.id.slice(0, 8)}`,
+      description: descriptionText || `Build ${b.id.slice(0, 8)}`,
       web_preview_url: b.artifacts?.web ?? null,
       mobile_preview_url: b.artifacts?.mobile ?? null,
     };
@@ -156,10 +157,16 @@ async function handleGetProjectServices(req: Request, projectId: string) {
     .select("service_stub, config")
     .eq("project_id", projectId);
   if (error) return json({ error: error.message }, 500);
-  const services = (data ?? []).map((row: any) => ({
-    stub: row.service_stub,
-    config: row.config ?? null,
-  }));
+  const apiBaseUrl = getApiBaseUrl(req);
+  const services = (data ?? []).map((row: any) => {
+    const stub = row.service_stub;
+    const base: { stub: string; config: any; proxyEndpoint?: string } = {
+      stub,
+      config: row.config ?? null,
+    };
+    if (apiBaseUrl && stub) base.proxyEndpoint = `${apiBaseUrl}/services/text/${stub}?projectId=${projectId}`;
+    return base;
+  });
   return json({ services });
 }
 
@@ -288,76 +295,43 @@ async function handleGetStagedBuilds(req: Request, projectId: string) {
 }
 
 async function handlePostMessage(req: Request, projectId: string, body: any) {
-  const auth = await getUserOrService(req, { allowServiceKey: true });
+  await getUserOrService(req, { allowServiceKey: true });
   await ensureProject(projectId);
   const message = body || {};
-  const model = validateModelStub(message.model);
-  if (!model) return json({ error: "model required or invalid" }, 400);
-  const authedUserId = auth.user?.id ?? null;
+  const model = message.model ? validateModelStub(message.model) : null;
+  if (message.model && !model) return json({ error: "model invalid" }, 400);
   const msgPayload = {
     id: message.id,
     project_id: projectId,
-    job_id: message.job_id ?? message.jobId ?? null,
     build_id: message.build_id ?? message.buildId ?? null,
+    role: message.role,
     type: message.type,
     content: message.content ?? null,
-    metadata: message.metadata ?? null,
     attachments: message.attachments ?? null,
     created_at: message.created_at ?? message.createdAt ?? null,
     model,
-    user_id: message.type === "user" ? (authedUserId ?? message.user_id ?? message.userId ?? null) : null,
   };
-  const isUserMessage = msgPayload.type === "user" && msgPayload.content;
-  let updatedProjectName: string | null = null;
-  if (isUserMessage) {
-    const { data: existingUserMessages, error: queryError } = await admin
-      .from("messages")
-      .select("id")
-      .eq("project_id", projectId)
-      .eq("type", "user")
-      .limit(1);
-    if (queryError) {
-      console.error("error checking existing messages:", queryError);
+  if (!msgPayload.role || !msgPayload.type || !msgPayload.content) {
+    return json({ error: "role, type, and content required" }, 400);
+  }
+  if (!Array.isArray(msgPayload.content)) {
+    return json({ error: "content must be an array" }, 400);
+  }
+  if (msgPayload.role === "user" && msgPayload.type === "talk") {
+    const promptText = extractMessageText(msgPayload.content);
+    if (!promptText) {
+      return json({ error: "prompt_required", message: "User talk messages must include text content." }, 400);
     }
-    const isFirstUserMessage = !existingUserMessages || existingUserMessages.length === 0;
-    if (isFirstUserMessage) {
-      const { data: project, error: projectError } = await admin.from("projects").select("name,status").eq("id", projectId).single();
-      if (projectError) {
-        console.error("error fetching project:", projectError);
-      }
-      const projectName = project?.name;
-      const updateFields: Record<string, unknown> = {};
-      if (!projectName || projectName === "New Project" || projectName.trim() === "New Project") {
-        try {
-          const generatedTitle = await generateTitleFromPrompt(msgPayload.content);
-          if (generatedTitle && generatedTitle.trim()) {
-            updateFields.name = generatedTitle.trim();
-            updatedProjectName = generatedTitle.trim();
-          }
-        } catch (err) {
-          console.error("exception during title generation:", err);
-        }
-      }
-      if (project?.status === "staged") {
-        updateFields.status = "active";
-      }
-      if (Object.keys(updateFields).length > 0) {
-        const { error: updateError } = await admin
-          .from("projects")
-          .update({ ...updateFields, updated_at: new Date().toISOString() })
-          .eq("id", projectId);
-        if (updateError) {
-          console.error("error updating project:", updateError);
-        }
-      }
-    }
+  }
+  if (msgPayload.role === "agent" && !msgPayload.build_id) {
+    return json({ error: "agent messages must include build_id" }, 400);
   }
   const { error } = await admin.from("messages").upsert(msgPayload, { onConflict: "id" });
   if (error) {
     console.error("[projects] insert message error", { projectId, msgPayload, error });
     return json({ error: error.message }, 500);
   }
-  return json({ ok: true, message: msgPayload, projectName: updatedProjectName });
+  return json({ ok: true, message: msgPayload });
 }
 
 async function fetchProjectsForUser(userId: string, includeDrafts: boolean) {
@@ -369,29 +343,10 @@ async function fetchProjectsForUser(userId: string, includeDrafts: boolean) {
     console.error("[projects] ownedProjects error", ownedErr);
   }
   const memberProjects: any[] = [];
-  // also include any projects where the user has authored messages (backfill for legacy rows missing ownership)
-  const { data: authoredMessageProjectIds, error: authoredMsgErr } = await admin
-    .from("messages")
-    .select("project_id")
-    .eq("user_id", userId);
-  if (authoredMsgErr) {
-    console.error("[projects] authoredMessageProjectIds error", authoredMsgErr);
-  }
-  const authoredIds = Array.from(new Set((authoredMessageProjectIds ?? []).map((m: any) => m.project_id).filter(Boolean)));
-  const { data: authoredProjects, error: authoredProjectsErr } = authoredIds.length > 0
-    ? await admin
-        .from("projects")
-        .select("id, name, owner_user_id, current_version_number, latest_build_id, created_at, updated_at, model, is_public, workspace_id, status")
-        .in("id", authoredIds)
-    : { data: [] as any[] };
-  if (authoredProjectsErr) {
-    console.error("[projects] authoredProjects error", authoredProjectsErr);
-  }
-  const allProjects = [...(ownedProjects ?? []), ...(memberProjects ?? []), ...(authoredProjects ?? [])];
+  const allProjects = [...(ownedProjects ?? []), ...(memberProjects ?? [])];
   console.log("[projects] handleGetProjects result counts", {
     owned: ownedProjects?.length ?? 0,
     member: memberProjects?.length ?? 0,
-    authored: authoredProjects?.length ?? 0,
     total: allProjects.length,
   });
   const uniqueProjects = Array.from(new Map(allProjects.map((p: any) => [p.id, p])).values()) as any[];
@@ -437,7 +392,6 @@ function serializeBuild(build: any) {
     job_id: build.job_id,
     version_id: build.version_number,
     status: build.status,
-    tasks: build.tasks ?? [],
     artifacts: build.artifacts ?? null,
     metadata: build.metadata ?? null,
     started_at: build.started_at,
@@ -449,6 +403,18 @@ function serializeBuild(build: any) {
     error_message: build.error_message ?? null,
     retry_of_build_id: build.retry_of_build_id ?? null,
   };
+}
+
+function extractMessageText(content: any): string {
+  if (!Array.isArray(content)) return "";
+  const parts = content.map((block) => {
+    if (!block || typeof block !== "object") return "";
+    if (block.kind === "text" || block.kind === "code") {
+      return typeof block.text === "string" ? block.text : "";
+    }
+    return "";
+  });
+  return parts.filter(Boolean).join("\n").trim();
 }
 
 async function buildProjectPayload(projectId: string, userId?: string) {
@@ -466,11 +432,6 @@ async function buildProjectPayload(projectId: string, userId?: string) {
     .eq("project_id", projectId)
     .order("sequence_number", { ascending: true });
   const visibleMessages = (messages ?? []).filter((m: any) => typeof m.id !== "string" || !m.id.startsWith("build-error-"));
-  const { data: buildsForProject } = await admin.from("builds").select("id,tasks").eq("project_id", projectId);
-  const tasksByBuild: Record<string, any[]> = {};
-  (buildsForProject ?? []).forEach((b: any) => {
-    if (b?.id && Array.isArray(b.tasks)) tasksByBuild[b.id] = b.tasks;
-  });
   const { data: versions } = await admin
     .from("builds")
     .select("version_number, artifacts")
@@ -489,11 +450,7 @@ async function buildProjectPayload(projectId: string, userId?: string) {
     current_version_id: project.current_version_number,
     latest_build_id: project.latest_build_id,
     status: project.status ?? null,
-    chat_history: visibleMessages.map((m: any) => ({
-      ...m,
-      type: m.type === "build" || m.type === "system" ? "action" : m.type,
-      tasks: Array.isArray((m as any).tasks) ? (m as any).tasks : (m.build_id && tasksByBuild[m.build_id]) || [],
-    })),
+    chat_history: visibleMessages,
     env_vars: envVars ?? [],
     versions: (versions ?? []).map((v) => ({
       id: v.version_number,

@@ -166,7 +166,7 @@ async function handleProjects(url: URL) {
 async function getBuildsData(limit: number, offset: number) {
   const { data, error, count } = await admin
     .from("builds")
-    .select("id,project_id,job_id,version_number,status,tasks,artifacts,started_at,ended_at,created_at,updated_at,error_code,error_message", { count: "exact" })
+    .select("id,project_id,job_id,version_number,status,artifacts,started_at,ended_at,created_at,updated_at,error_code,error_message", { count: "exact" })
     .order("created_at", { ascending: false })
     .range(offset, offset + limit - 1);
   if (error) throw error;

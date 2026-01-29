@@ -51,7 +51,6 @@ create table public.builds (
   version_number int,
   is_promoted boolean default false,
   status text check (status in ('queued','running','succeeded','failed')) default 'queued',
-  tasks jsonb,
   artifacts jsonb,
   source text, -- raw source archive/base64
   source_encoding text default 'base64',
@@ -63,33 +62,24 @@ create table public.builds (
 create index builds_proj_created_idx on public.builds (project_id, created_at);
 create index builds_promoted_idx on public.builds (project_id, is_promoted, coalesce(version_number, 0));
 
--- Build steps
-create table public.build_steps (
-  project_id text references public.projects(id) on delete cascade,
-  build_id text references public.builds(id) on delete cascade,
-  step_id text,
-  title text,
-  status text check (status in ('pending','in_progress','completed','failed')),
-  message text,
-  created_at timestamptz default now(),
-  updated_at timestamptz default now(),
-  primary key (project_id, build_id, step_id)
-);
-
--- Messages tied to a project/build/job
+-- Messages tied to a project/build
 create table public.messages (
   id text primary key,
   project_id text references public.projects(id) on delete cascade,
-  job_id text references public.jobs(job_id) on delete set null,
   build_id text references public.builds(id) on delete set null,
-  type text check (type in ('user','assistant','system','build','action')),
-  author text,
-  content text,
-  metadata jsonb,
+  role text check (role in ('user','agent')) not null,
+  type text not null,
+  content jsonb not null,
   attachments jsonb,
-  created_at timestamptz default now()
+  model text,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  sequence_number bigserial,
+  constraint messages_agent_build_check check (role <> 'agent' or build_id is not null),
+  constraint messages_content_array_check check (jsonb_typeof(content) = 'array')
 );
-create index messages_project_created_idx on public.messages (project_id, created_at);
+create index messages_project_sequence_idx on public.messages (project_id, sequence_number);
+create index messages_build_created_idx on public.messages (build_id, created_at);
 
 -- Environment variables per project and service
 create table public.env_vars (
@@ -107,7 +97,6 @@ alter table public.projects enable row level security;
 -- project_members table removed
 alter table public.jobs enable row level security;
 alter table public.builds enable row level security;
-alter table public.build_steps enable row level security;
 alter table public.messages enable row level security;
 alter table public.env_vars enable row level security;
 
@@ -175,13 +164,6 @@ begin
   -- builds
   if not exists (select 1 from pg_policies where schemaname='public' and tablename='builds' and policyname='builds_rw') then
     create policy builds_rw on public.builds
-      using (public.is_project_member(project_id))
-      with check (public.is_project_member(project_id));
-  end if;
-
-  -- build_steps
-  if not exists (select 1 from pg_policies where schemaname='public' and tablename='build_steps' and policyname='build_steps_rw') then
-    create policy build_steps_rw on public.build_steps
       using (public.is_project_member(project_id))
       with check (public.is_project_member(project_id));
   end if;

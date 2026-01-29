@@ -1,15 +1,37 @@
--- Job leases + heartbeat + killed status
+-- Hard migration to the new agent/client message protocol.
 
-alter table public.jobs add column if not exists worker_id text;
-alter table public.jobs add column if not exists last_heartbeat timestamptz;
+-- Remove legacy build step/task storage.
+drop table if exists public.build_steps cascade;
+alter table public.builds drop column if exists tasks;
 
-alter table public.jobs drop constraint if exists jobs_status_check;
-alter table public.jobs add constraint jobs_status_check
-  check (status in ('queued','claimed','running','succeeded','failed','killed'));
+-- Replace messages table with the new schema.
+drop table if exists public.messages cascade;
+create table public.messages (
+  id text primary key,
+  project_id text references public.projects(id) on delete cascade,
+  build_id text references public.builds(id) on delete set null,
+  role text not null check (role in ('user','agent')),
+  type text not null,
+  content jsonb not null,
+  attachments jsonb,
+  model text,
+  created_at timestamptz default now(),
+  updated_at timestamptz default now(),
+  sequence_number bigserial
+);
+create index if not exists messages_project_sequence_idx on public.messages (project_id, sequence_number);
+create index if not exists messages_build_created_idx on public.messages (build_id, created_at);
+alter table public.messages add constraint messages_agent_build_check
+  check (role <> 'agent' or build_id is not null);
+alter table public.messages add constraint messages_content_array_check
+  check (jsonb_typeof(content) = 'array');
 
-create index if not exists jobs_last_heartbeat_idx on public.jobs (last_heartbeat);
-create index if not exists jobs_worker_id_idx on public.jobs (worker_id);
+alter table public.messages enable row level security;
+create policy messages_rw on public.messages
+  using (public.is_project_member(project_id))
+  with check (public.is_project_member(project_id));
 
+-- Recreate claim_next_job without build_steps/tasks cleanup and with agent-message reset.
 create or replace function public.claim_next_job(
   p_project_id text default null,
   p_worker_id text default null
@@ -139,15 +161,19 @@ begin
     return;
   end if;
 
-  update public.jobs j
+  update public.jobs
      set status = 'claimed',
          claimed_at = now(),
-         updated_at = now(),
          worker_id = p_worker_id,
-         last_heartbeat = now()
-   where j.job_id = v_job.job_id;
+         last_heartbeat = now(),
+         updated_at = now()
+   where job_id = v_job.job_id;
 
-  return query
-  select v_job.job_id, v_job.project_id, v_job.model, v_job.workspace_id, v_job.payload;
+  job_id := v_job.job_id;
+  project_id := v_job.project_id;
+  model := v_job.model;
+  workspace_id := v_job.workspace_id;
+  payload := v_job.payload;
+  return next;
 end;
 $$;

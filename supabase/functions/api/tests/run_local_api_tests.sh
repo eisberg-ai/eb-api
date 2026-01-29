@@ -2,8 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../../.." && pwd)"
-SUPABASE_DIR="${REPO_ROOT}/api/supabase"
+SUPABASE_DIR="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 TESTS_DIR="${SCRIPT_DIR}"
 
 # allow running specific test file or all tests
@@ -15,15 +14,21 @@ fi
 
 started_here=0
 
-if ! status_json="$(supabase status --output json --workdir "${SUPABASE_DIR}" 2>/dev/null)"; then
-  supabase start --workdir "${SUPABASE_DIR}"
-  started_here=1
-  status_json="$(supabase status --output json --workdir "${SUPABASE_DIR}")"
-fi
-
 if [[ "${RESET_DB:-0}" == "1" ]]; then
-  supabase db reset --workdir "${SUPABASE_DIR}" --yes
+  if ! status_json="$(supabase status --output json --workdir "${SUPABASE_DIR}" 2>/dev/null)"; then
+    supabase start --ignore-health-check --workdir "${SUPABASE_DIR}"
+    started_here=1
+    supabase db reset --workdir "${SUPABASE_DIR}" --yes
+  else
+    supabase db reset --workdir "${SUPABASE_DIR}" --yes
+  fi
   status_json="$(supabase status --output json --workdir "${SUPABASE_DIR}")"
+else
+  if ! status_json="$(supabase status --output json --workdir "${SUPABASE_DIR}" 2>/dev/null)"; then
+    supabase start --workdir "${SUPABASE_DIR}"
+    started_here=1
+    status_json="$(supabase status --output json --workdir "${SUPABASE_DIR}")"
+  fi
 fi
 
 export SUPABASE_URL

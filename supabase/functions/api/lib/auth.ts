@@ -8,23 +8,6 @@ export async function getUserFromRequest(req: Request) {
   const token = authHeader.replace("Bearer ", "");
   const { data: { user }, error } = await admin.auth.getUser(token);
   if (user) return user;
-  try {
-    const parts = token.split(".");
-    if (parts.length === 3) {
-      const payload = JSON.parse(atob(parts[1]));
-      if (payload?.email && payload?.sub) {
-        return {
-          id: payload.sub,
-          email: payload.email,
-          app_metadata: {},
-          user_metadata: {},
-          aud: payload.aud ?? "authenticated",
-        } as any;
-      }
-    }
-  } catch (_e) {
-    // ignore
-  }
   if (error) {
     console.error("auth getUser failed", error);
   }

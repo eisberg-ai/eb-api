@@ -5,6 +5,7 @@ import { ensureProject, isProModel, setProjectStatus, validateModelStub } from "
 import { callLLM } from "../lib/llm.ts";
 import { startVm } from "../lib/vm.ts";
 import { upsertSystemMessage } from "../lib/messages.ts";
+import { generateVmAcquiredMessage } from "../lib/vmMessages.ts";
 
 const MAX_STAGED_BUILDS = 3;
 
@@ -70,7 +71,6 @@ async function handlePostChat(req: Request, body: any) {
   const messageId = (body.message_id ?? crypto.randomUUID()).toString();
   const buildId = `build-${Date.now()}`;
   const messageModel = model;
-  const userId = user.id;
   await ensureProject(projectId, user.id);
   const { data: projectRow, error: projectErr } = await admin
     .from("projects")
@@ -121,7 +121,7 @@ async function handlePostChat(req: Request, body: any) {
     .from("messages")
     .select("id")
     .eq("project_id", projectId)
-    .eq("type", "user")
+    .eq("role", "user")
     .limit(1);
   const isFirstUserMessage = !existingUserMessages || existingUserMessages.length === 0;
   let updatedProjectName: string | null = null;
@@ -138,51 +138,16 @@ async function handlePostChat(req: Request, body: any) {
       }
     }
   }
-  // create message
-  const { error: msgErr } = await admin
-    .from("messages")
-    .upsert(
-      {
-        id: messageId,
-        project_id: projectId,
-        job_id: body.job_id ?? null,
-        type: "user",
-        content: message,
-        metadata: null,
-        attachments: body.attachments ?? null,
-        model: messageModel,
-        user_id: userId,
-      },
-      { onConflict: "id" },
-    );
-  if (msgErr) {
-    if (msgErr.message?.includes("ON CONFLICT")) {
-      const { error: insertErr } = await admin
-        .from("messages")
-        .insert(
-          {
-            id: messageId,
-            project_id: projectId,
-            job_id: body.job_id ?? null,
-            type: "user",
-            content: message,
-            metadata: null,
-            attachments: body.attachments ?? null,
-            model: messageModel,
-            user_id: userId,
-          },
-        );
-      if (!insertErr) {
-        console.warn("[chat] message upsert failed, fallback insert succeeded", { projectId, messageId });
-      } else {
-        console.error("[chat] insert message error", { projectId, messageId, error: insertErr });
-        return json({ error: insertErr.message }, 500);
-      }
-    } else {
-      console.error("[chat] insert message error", { projectId, messageId, error: msgErr });
-      return json({ error: msgErr.message }, 500);
-    }
-  }
+  const messagePayload = {
+    id: messageId,
+    project_id: projectId,
+    build_id: buildId,
+    role: "user",
+    type: "talk",
+    content: [{ kind: "text", text: message }],
+    attachments: body.attachments ?? null,
+    model: messageModel,
+  };
   // enable services from attachments
   if (body.attachments?.services && Array.isArray(body.attachments.services)) {
     for (const service of body.attachments.services) {
@@ -221,12 +186,29 @@ async function handlePostChat(req: Request, body: any) {
     depends_on_build_id: dependsOnBuildId,
   });
   if (buildErr) return json({ error: buildErr.message }, 500);
+  const { error: msgErr } = await admin.from("messages").upsert(messagePayload, { onConflict: "id" });
+  if (msgErr) {
+    if (msgErr.message?.includes("ON CONFLICT")) {
+      const { error: insertErr } = await admin.from("messages").insert(messagePayload);
+      if (!insertErr) {
+        console.warn("[chat] message upsert failed, fallback insert succeeded", { projectId, messageId });
+      } else {
+        console.error("[chat] insert message error", { projectId, messageId, error: insertErr });
+        await admin.from("builds").delete().eq("id", buildId);
+        return json({ error: insertErr.message }, 500);
+      }
+    } else {
+      console.error("[chat] insert message error", { projectId, messageId, error: msgErr });
+      await admin.from("builds").delete().eq("id", buildId);
+      return json({ error: msgErr.message }, 500);
+    }
+  }
   // for staged builds (has dependency), return early without creating a job
   if (shouldStage) {
     return json({
       ok: true,
       staged: true,
-      message: { id: messageId, project_id: projectId, content: message },
+      message: { id: messageId, project_id: projectId, role: "user", type: "talk", content: [{ kind: "text", text: message }] },
       build: { id: buildId, status: "pending", depends_on_build_id: dependsOnBuildId, agent_version: defaultAgentVersion },
       project_name: updatedProjectName,
     });
@@ -260,6 +242,7 @@ async function handlePostChat(req: Request, body: any) {
     projectId,
     buildId,
     content: "Acquiring agent VM...",
+    type: "vm",
   });
   if (acquiringErr) {
     console.warn("[chat] failed to insert VM acquiring message", { projectId, buildId, error: acquiringErr.message });
@@ -273,14 +256,20 @@ async function handlePostChat(req: Request, body: any) {
       agentType: defaultAgentVersion,
     });
     const acquiredMessageId = `vm-acquired-${buildId}`;
-    const acquiredErr = await upsertSystemMessage({
-      id: acquiredMessageId,
-      projectId,
-      buildId,
-      content: "...Agent VM acquired",
-    });
-    if (acquiredErr) {
-      console.warn("[chat] failed to insert VM acquired message", { projectId, buildId, error: acquiredErr.message });
+    try {
+      const acquiredText = await generateVmAcquiredMessage();
+      const acquiredErr = await upsertSystemMessage({
+        id: acquiredMessageId,
+        projectId,
+        buildId,
+        content: acquiredText,
+        type: "vm",
+      });
+      if (acquiredErr) {
+        console.warn("[chat] failed to insert VM acquired message", { projectId, buildId, error: acquiredErr.message });
+      }
+    } catch (err) {
+      console.warn("[chat] failed to generate VM acquired message", { projectId, buildId, error: err });
     }
     // update build to queued
     await admin.from("builds").update({ status: "queued" }).eq("id", buildId);
