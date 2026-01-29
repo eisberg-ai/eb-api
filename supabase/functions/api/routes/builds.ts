@@ -7,7 +7,7 @@ import { parseBuildErrorCode } from "../lib/buildErrors.ts";
 import { normalizeErrorMessage } from "../lib/buildFailure.ts";
 import { startVm } from "../lib/vm.ts";
 import { upsertSystemMessage } from "../lib/messages.ts";
-import { generateVmAcquiredMessage } from "../lib/vmMessages.ts";
+import { generateVmAcquiredMessage, generateVmAcquiringMessage } from "../lib/vmMessages.ts";
 
 type BuildStatus = "pending" | "queued" | "running" | "succeeded" | "failed";
 const MAX_RETRIES = 3;
@@ -48,11 +48,12 @@ async function promoteNextStagedBuild(completedBuildId: string, projectId: strin
   }
   // start vm build
   try {
+    const acquiringContent = await generateVmAcquiringMessage();
     const acquiringErr = await upsertSystemMessage({
       id: `vm-acquiring-${nextBuild.id}`,
       projectId,
       buildId: nextBuild.id,
-      content: "Acquiring agent VM...",
+      content: acquiringContent,
       type: "vm",
     });
     if (acquiringErr) {
@@ -576,11 +577,12 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
   await admin.from("projects").update({ latest_build_id: newBuildId }).eq("id", build.project_id);
 
   try {
+    const acquiringContent = await generateVmAcquiringMessage();
     const acquiringErr = await upsertSystemMessage({
       id: `vm-acquiring-${newBuildId}`,
       projectId: build.project_id,
       buildId: newBuildId,
-      content: "Acquiring agent VM...",
+      content: acquiringContent,
       type: "vm",
     });
     if (acquiringErr) {

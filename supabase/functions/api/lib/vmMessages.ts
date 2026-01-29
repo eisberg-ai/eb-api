@@ -5,35 +5,29 @@ type HaikuConfig = {
 };
 
 const DEFAULT_MODEL = "claude-3-haiku-20240307";
-const DEFAULT_TEMPERATURE = 1.15;
+const DEFAULT_TEMPERATURE = 0.7;
 const DEFAULT_MAX_TOKENS = 64;
 
 function loadHaikuConfig(): HaikuConfig {
   const model = (Deno.env.get("VM_HAIKU_MODEL") || DEFAULT_MODEL).trim();
   const temperatureRaw = Deno.env.get("VM_HAIKU_TEMPERATURE");
   const maxTokensRaw = Deno.env.get("VM_HAIKU_MAX_TOKENS");
-  const temperature = temperatureRaw ? Number(temperatureRaw) : DEFAULT_TEMPERATURE;
+  const rawTemp = temperatureRaw ? Number(temperatureRaw) : DEFAULT_TEMPERATURE;
+  const temperature = Number.isFinite(rawTemp) ? Math.max(0, Math.min(1, rawTemp)) : DEFAULT_TEMPERATURE;
   const maxTokens = maxTokensRaw ? Number(maxTokensRaw) : DEFAULT_MAX_TOKENS;
   return {
     model,
-    temperature: Number.isFinite(temperature) ? temperature : DEFAULT_TEMPERATURE,
+    temperature,
     maxTokens: Number.isFinite(maxTokens) ? maxTokens : DEFAULT_MAX_TOKENS,
   };
 }
 
-export async function generateVmAcquiredMessage(): Promise<string> {
+async function callHaiku(systemPrompt: string, userPrompt: string): Promise<string> {
   const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not configured");
   }
   const config = loadHaikuConfig();
-  const systemPrompt = [
-    "You write short, playful, forward-moving haiku (5-7-5).",
-    "Signal that momentum is about to begin.",
-    "Avoid words like VM, agent, acquired, build, or starting.",
-    "Avoid redundancy with status lines like 'Acquiring agent VM...'.",
-    "Output only the haiku, exactly 3 lines, no quotes.",
-  ].join(" ");
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -44,7 +38,7 @@ export async function generateVmAcquiredMessage(): Promise<string> {
     body: JSON.stringify({
       model: config.model,
       system: systemPrompt,
-      messages: [{ role: "user", content: "Write the haiku now." }],
+      messages: [{ role: "user", content: userPrompt }],
       temperature: config.temperature,
       max_tokens: config.maxTokens,
     }),
@@ -59,4 +53,21 @@ export async function generateVmAcquiredMessage(): Promise<string> {
     throw new Error("anthropic response empty");
   }
   return text;
+}
+
+/** Returns a 3–5 word phrase: we are acquiring the agent VM, build about to start. */
+export async function generateVmAcquiringMessage(): Promise<string> {
+  const systemPrompt = [
+    "You write a single short phrase, 3–5 words, signaling that we are acquiring the agent VM",
+    "and app building is about to start. Output only that phrase, nothing else.",
+  ].join(" ");
+  return callHaiku(systemPrompt, "Generate the phrase now.");
+}
+
+export async function generateVmAcquiredMessage(): Promise<string> {
+  const systemPrompt = [
+    "You write short, playful, forward-moving message that we are acquiring an agent VM.",
+    "Output only the haiku, exactly 3 lines, no quotes. Always trail the message with three dots.",
+  ].join(" ");
+  return callHaiku(systemPrompt, "Write the haiku now.");
 }

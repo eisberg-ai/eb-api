@@ -5,7 +5,7 @@ import { ensureProject, isProModel, setProjectStatus, validateModelStub } from "
 import { callLLM } from "../lib/llm.ts";
 import { startVm } from "../lib/vm.ts";
 import { upsertSystemMessage } from "../lib/messages.ts";
-import { generateVmAcquiredMessage } from "../lib/vmMessages.ts";
+import { generateVmAcquiredMessage, generateVmAcquiringMessage } from "../lib/vmMessages.ts";
 
 const MAX_STAGED_BUILDS = 3;
 
@@ -237,11 +237,12 @@ async function handlePostChat(req: Request, body: any) {
     return json({ error: "insufficient_balance", build: { id: buildId, status: "failed" }, balance }, 402);
   }
   const acquiringMessageId = `vm-acquiring-${buildId}`;
+  const acquiringContent = await generateVmAcquiringMessage();
   const acquiringErr = await upsertSystemMessage({
     id: acquiringMessageId,
     projectId,
     buildId,
-    content: "Acquiring agent VM...",
+    content: acquiringContent,
     type: "vm",
   });
   if (acquiringErr) {
