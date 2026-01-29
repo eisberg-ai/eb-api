@@ -284,10 +284,15 @@ async function handlePostChat(req: Request, body: any) {
   } catch (err) {
     // mark build as failed
     const errorMsg = (err as Error).message;
+    const isWakeError = errorMsg.startsWith("vm_wake_failed");
+    const errorCode = isWakeError ? "vm_wake_failed" : "worker_error";
+    const errorMessage = isWakeError
+      ? `VM wake failed${errorMsg.includes(":") ? ` (${errorMsg.split(":", 2)[1]})` : ""}`
+      : errorMsg;
     await admin.from("builds").update({
       status: "failed",
-      error_code: "worker_error",
-      error_message: errorMsg,
+      error_code: errorCode,
+      error_message: errorMessage,
       metadata: { message_id: messageId, retry_count: 0 },
       ended_at: new Date().toISOString(),
     }).eq("id", buildId);

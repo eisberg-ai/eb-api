@@ -86,11 +86,17 @@ async function promoteNextStagedBuild(completedBuildId: string, projectId: strin
     return { build: nextBuild, vm };
   } catch (err) {
     console.error("[staging] failed to queue build", { buildId: nextBuild.id, error: err });
+    const errorMsg = (err as Error).message;
+    const isWakeError = errorMsg.startsWith("vm_wake_failed");
+    const errorCode = isWakeError ? "vm_wake_failed" : "staging_promotion_failed";
+    const errorMessage = isWakeError
+      ? `VM wake failed${errorMsg.includes(":") ? ` (${errorMsg.split(":", 2)[1]})` : ""}`
+      : errorMsg;
     // mark the staging build as failed
     await admin.from("builds").update({
       status: "failed",
-      error_code: "staging_promotion_failed",
-      error_message: (err as Error).message,
+      error_code: errorCode,
+      error_message: errorMessage,
       ended_at: new Date().toISOString(),
     }).eq("id", nextBuild.id);
     return null;
@@ -610,10 +616,15 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
     });
   } catch (err) {
     const errorMsg = (err as Error).message;
+    const isWakeError = errorMsg.startsWith("vm_wake_failed");
+    const errorCode = isWakeError ? "vm_wake_failed" : "worker_error";
+    const errorMessage = isWakeError
+      ? `VM wake failed${errorMsg.includes(":") ? ` (${errorMsg.split(":", 2)[1]})` : ""}`
+      : errorMsg;
     await admin.from("builds").update({
       status: "failed",
-      error_code: "worker_error",
-      error_message: errorMsg,
+      error_code: errorCode,
+      error_message: errorMessage,
       ended_at: new Date().toISOString(),
     }).eq("id", newBuildId);
     return json({ error: errorMsg }, 500);

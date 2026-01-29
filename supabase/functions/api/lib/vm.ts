@@ -36,6 +36,32 @@ async function loadAssignedVm(projectId: string) {
   return data ?? null;
 }
 
+async function pruneStaleVms(cutoffIso: string) {
+  const now = new Date().toISOString();
+  const { data, error } = await admin
+    .from("vms")
+    .update({
+      status: "error",
+      runtime_state: "error",
+      project_id: null,
+      desired_build_id: null,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_shutdown_at: now,
+      updated_at: now,
+    })
+    .in("status", ["idle", "busy", "starting"])
+    .or(`last_heartbeat_at.is.null,last_heartbeat_at.lt.${cutoffIso}`)
+    .select("id, instance_id");
+  if (error) {
+    console.error("[vm] prune stale failed", { error: error.message });
+    return;
+  }
+  if (data && data.length > 0) {
+    console.warn("[vm] pruned stale vms", { count: data.length });
+  }
+}
+
 async function findIdleVm(cutoffIso: string) {
   const { data } = await admin
     .from("vms")
@@ -76,9 +102,30 @@ async function claimVm(vmId: string, args: { projectId: string; mode: VmMode; bu
   return data;
 }
 
+async function releaseVm(vmId: string, reason?: string) {
+  const now = new Date().toISOString();
+  const { error } = await admin
+    .from("vms")
+    .update({
+      status: "idle",
+      runtime_state: "serving",
+      project_id: null,
+      desired_build_id: null,
+      lease_owner: null,
+      lease_expires_at: null,
+      last_shutdown_at: now,
+      updated_at: now,
+    })
+    .eq("id", vmId);
+  if (error) {
+    console.error("[vm] release failed", { vmId, reason, error: error.message });
+  }
+}
+
 export async function startVm(args: { projectId: string; mode: VmMode; buildId?: string | null; agentType?: string | null }) {
   const now = new Date();
   const cutoff = new Date(now.getTime() - heartbeatTtlSec * 1000).toISOString();
+  await pruneStaleVms(cutoff);
   const assigned = await loadAssignedVm(args.projectId);
   if (assigned && assigned.status !== "idle") {
     throw new Error("project already has active vm");
@@ -99,7 +146,10 @@ export async function startVm(args: { projectId: string; mode: VmMode; buildId?:
     vm = await claimVm(idle.id, args);
   }
   if (!vm) throw new Error("failed to claim vm");
-  if (!vm.base_url) throw new Error("assigned vm missing base_url");
+  if (!vm.base_url) {
+    await releaseVm(vm.id, "missing_base_url");
+    throw new Error("assigned vm missing base_url");
+  }
   console.info("[vm] claimed", {
     id: vm.id,
     instance_id: vm.instance_id,
@@ -111,6 +161,7 @@ export async function startVm(args: { projectId: string; mode: VmMode; buildId?:
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
   let wakeOk = false;
+  let wakeError: string | null = null;
   try {
     const resp = await fetch(wakeUrl, {
       method: "POST",
@@ -125,12 +176,18 @@ export async function startVm(args: { projectId: string; mode: VmMode; buildId?:
     });
     wakeOk = resp.ok;
     if (!resp.ok) {
+      wakeError = `vm_wake_failed:${resp.status}`;
       console.error("[vm] wake failed", { projectId: args.projectId, status: resp.status });
     }
   } catch (err) {
+    wakeError = `vm_wake_failed:${(err as Error).message || "unknown"}`;
     console.error("[vm] wake error", { projectId: args.projectId, error: err });
   } finally {
     clearTimeout(timeoutId);
+  }
+  if (!wakeOk) {
+    await releaseVm(vm.id, wakeError ?? "vm_wake_failed");
+    throw new Error(wakeError ?? "vm_wake_failed");
   }
   return { vm: vm as VmRow, wakeOk };
 }
