@@ -55,19 +55,10 @@ async function callHaiku(systemPrompt: string, userPrompt: string): Promise<stri
   return text;
 }
 
-/** Returns a 3–5 word phrase: we are acquiring the agent VM, build about to start. */
-export async function generateVmAcquiringMessage(): Promise<string> {
-  const systemPrompt = [
-    "You write a single short phrase, 3–5 words, signaling that we are acquiring the agent VM",
-    "and app building is about to start. Output only that phrase, nothing else.",
-  ].join(" ");
-  return callHaiku(systemPrompt, "Generate the phrase now.");
-}
-
 export async function generateVmAcquiredMessage(): Promise<string> {
   const systemPrompt = [
     "You write short, playful, forward-moving message that we are acquiring an agent VM.",
-    "Output only the haiku, exactly 3 lines, no quotes. Always trail the message with three dots.",
+    "Output only the message, no quotes. Always trail the message with three dots.",
   ].join(" ");
   return callHaiku(systemPrompt, "Write the haiku now.");
 }
