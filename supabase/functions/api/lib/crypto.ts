@@ -51,3 +51,11 @@ export async function decryptJson<T>(secret: string, payload: string): Promise<T
   const plaintext = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, data);
   return JSON.parse(decoder.decode(plaintext)) as T;
 }
+
+export async function sha256Hex(value: string): Promise<string> {
+  const bytes = encoder.encode(value);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}

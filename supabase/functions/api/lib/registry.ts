@@ -1,5 +1,5 @@
 import type { ServiceDefinition } from "../routes/services/text.ts";
-import { textServices } from "../routes/services/text.ts";
+import { getTextServices } from "../routes/services/text.ts";
 import { getVideoServices } from "../routes/services/video.ts";
 import { getAudioServices } from "../routes/services/audio.ts";
 import { getImageServices } from "../routes/services/image.ts";
@@ -50,7 +50,7 @@ export const models: ModelDefinition[] = [
 
 export function getServicesRegistry(): Record<string, ServiceDefinition[]> {
   return {
-    text: textServices,
+    text: getTextServices(),
     video: getVideoServices(),
     audio: getAudioServices(),
     image: getImageServices(),
@@ -61,7 +61,6 @@ export function getServicesRegistry(): Record<string, ServiceDefinition[]> {
 export function getModelsRegistry(): ModelDefinition[] {
   return models;
 }
-
 
 
 

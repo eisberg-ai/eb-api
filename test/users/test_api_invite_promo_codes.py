@@ -3,29 +3,24 @@ Integration tests for invite and promo code flows.
 """
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import pytest
 import requests
 
-from test.worker.utils import ensure_access_token, load_env_file, resolve_api_url, resolve_auth_url
-
-
-def resolve_env() -> dict[str, str]:
-    env = dict(os.environ)
-    if env.get("SUPABASE_URL") and env.get("SUPABASE_SERVICE_ROLE_KEY"):
-        return env
-    env_file = Path(__file__).resolve().parents[2] / "worker" / ".env.local"
-    env.update(load_env_file(env_file))
-    return env
+from test.utils import (
+    admin_headers,
+    auth_headers,
+    ensure_access_token,
+    resolve_api_url,
+    resolve_auth_url,
+    resolve_env,
+)
 
 
 def build_urls(env: dict[str, str]) -> tuple[str, str]:
     supabase_url = env.get("SUPABASE_URL", "").rstrip("/")
     if not supabase_url:
         raise RuntimeError("SUPABASE_URL is required for integration tests.")
-    api_url = env.get("API_URL") or resolve_api_url(supabase_url)
+    api_url = resolve_api_url(supabase_url, env)
     auth_url = resolve_auth_url(supabase_url)
     return api_url, auth_url
 
@@ -40,14 +35,10 @@ def test_invite_code_redeem_flow() -> None:
     api_url, _auth_url = build_urls(env)
     access_token = ensure_access_token(service_key, env.get("SUPABASE_URL", ""))
 
-    admin_headers = {
-        "Authorization": f"Bearer {service_key}",
-        "apikey": service_key,
-        "Content-Type": "application/json",
-    }
+    admin_headers_map = admin_headers(service_key)
     invite_resp = requests.post(
         f"{api_url}/admin/invites",
-        headers=admin_headers,
+        headers=admin_headers_map,
         json={},
         timeout=15,
     )
@@ -56,10 +47,7 @@ def test_invite_code_redeem_flow() -> None:
     code = invite_data.get("code")
     assert code, "admin invite did not return a code"
 
-    user_headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
+    user_headers = auth_headers(access_token)
     redeem_resp = requests.post(
         f"{api_url}/auth/invite",
         headers=user_headers,
@@ -100,14 +88,10 @@ def test_promo_code_one_time_use() -> None:
     api_url, _auth_url = build_urls(env)
     access_token = ensure_access_token(service_key, env.get("SUPABASE_URL", ""))
 
-    admin_headers = {
-        "Authorization": f"Bearer {service_key}",
-        "apikey": service_key,
-        "Content-Type": "application/json",
-    }
+    admin_headers_map = admin_headers(service_key)
     promo_resp = requests.post(
         f"{api_url}/admin/promo-codes",
-        headers=admin_headers,
+        headers=admin_headers_map,
         json={"amount": 5},
         timeout=15,
     )
@@ -116,10 +100,7 @@ def test_promo_code_one_time_use() -> None:
     code = promo_data.get("code")
     assert code, "admin promo did not return a code"
 
-    user_headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json",
-    }
+    user_headers = auth_headers(access_token)
     redeem_resp = requests.post(
         f"{api_url}/billing/promo",
         headers=user_headers,

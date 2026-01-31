@@ -3,54 +3,24 @@ integration tests for message staging feature.
 """
 from __future__ import annotations
 
-import os
 import time
 import uuid
 
 import pytest
 import requests
 
-
-def get_api_url() -> str:
-    """get api url from environment."""
-    supabase_url = os.getenv('SUPABASE_URL', 'http://127.0.0.1:54321').rstrip('/')
-    return os.getenv('API_URL') or f'{supabase_url}/functions/v1/api'
+from test.utils import ensure_access_token, resolve_api_url, resolve_env
 
 
-def get_service_key() -> str | None:
-    """get supabase service role key from environment."""
-    return os.getenv('SUPABASE_SERVICE_ROLE_KEY')
-
-
-def create_test_user(api_url: str, service_key: str) -> str:
-    """
-    create a test user and return access token.
-    uses admin generate_link to bypass email confirmation.
-    """
-    email = f'test-staging-{uuid.uuid4().hex[:8]}@local.test'
-    password = f'TestPass{uuid.uuid4().hex[:8]}!'
-    supabase_url = os.getenv('SUPABASE_URL', 'http://127.0.0.1:54321').rstrip('/')
-    auth_url = f'{supabase_url}/auth/v1'
-    admin_url = f'{auth_url}/admin/generate_link'
-    resp = requests.post(
-        admin_url,
-        json={'type': 'signup', 'email': email, 'password': password},
-        headers={
-            'Authorization': f'Bearer {service_key}',
-            'apikey': service_key,
-            'Content-Type': 'application/json',
-        },
-        timeout=10,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f'failed to create test user: {resp.text}')
-    data = resp.json()
-    # extract access token from action link
-    action_link = data.get('properties', {}).get('action_link', '')
-    if 'access_token=' not in action_link:
-        raise RuntimeError('no access token in action link')
-    token_part = action_link.split('access_token=')[1].split('&')[0]
-    return token_part
+def resolve_test_auth() -> tuple[str, str]:
+    env = resolve_env()
+    service_key = env.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not service_key:
+        pytest.skip("SUPABASE_SERVICE_ROLE_KEY not set")
+    supabase_url = env.get("SUPABASE_URL", "http://127.0.0.1:54321").rstrip("/")
+    api_url = resolve_api_url(supabase_url, env)
+    access_token = ensure_access_token(service_key, supabase_url)
+    return api_url, access_token
 
 
 @pytest.mark.integration
@@ -58,11 +28,7 @@ def test_staged_build_creation() -> None:
     """
     test that follow-up messages create staged builds.
     """
-    service_key = get_service_key()
-    if not service_key:
-        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
-    api_url = get_api_url()
-    access_token = create_test_user(api_url, service_key)
+    api_url, access_token = resolve_test_auth()
     project_id = f'project-staging-{uuid.uuid4().hex[:8]}'
     # first message (non-staged)
     first_resp = requests.post(
@@ -96,11 +62,7 @@ def test_max_staged_builds_limit() -> None:
     """
     test that max 3 staged builds can be queued.
     """
-    service_key = get_service_key()
-    if not service_key:
-        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
-    api_url = get_api_url()
-    access_token = create_test_user(api_url, service_key)
+    api_url, access_token = resolve_test_auth()
     project_id = f'project-max-staging-{uuid.uuid4().hex[:8]}'
     # first message
     requests.post(
@@ -136,11 +98,7 @@ def test_get_staged_builds() -> None:
     """
     test fetching staged builds for a project.
     """
-    service_key = get_service_key()
-    if not service_key:
-        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
-    api_url = get_api_url()
-    access_token = create_test_user(api_url, service_key)
+    api_url, access_token = resolve_test_auth()
     project_id = f'project-get-staging-{uuid.uuid4().hex[:8]}'
     # first message
     requests.post(
@@ -181,11 +139,7 @@ def test_delete_staged_build_with_chain_repair() -> None:
     """
     test deleting a staged build repairs the dependency chain.
     """
-    service_key = get_service_key()
-    if not service_key:
-        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
-    api_url = get_api_url()
-    access_token = create_test_user(api_url, service_key)
+    api_url, access_token = resolve_test_auth()
     project_id = f'project-delete-staging-{uuid.uuid4().hex[:8]}'
     # first message
     first_resp = requests.post(
@@ -245,11 +199,7 @@ def test_build_promotion_on_success() -> None:
     """
     test that staged builds are promoted when dependency succeeds.
     """
-    service_key = get_service_key()
-    if not service_key:
-        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
-    api_url = get_api_url()
-    access_token = create_test_user(api_url, service_key)
+    api_url, access_token = resolve_test_auth()
     project_id = f'project-promote-staging-{uuid.uuid4().hex[:8]}'
     # first message
     first_resp = requests.post(
@@ -298,11 +248,7 @@ def test_failed_build_blocks_new_messages() -> None:
     """
     test that a failed build blocks new messages.
     """
-    service_key = get_service_key()
-    if not service_key:
-        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
-    api_url = get_api_url()
-    access_token = create_test_user(api_url, service_key)
+    api_url, access_token = resolve_test_auth()
     project_id = f'project-failed-staging-{uuid.uuid4().hex[:8]}'
     # create and fail a build
     first_resp = requests.post(
@@ -337,11 +283,7 @@ def test_edit_staged_build_updates_content() -> None:
     """
     test editing a staged build updates its content.
     """
-    service_key = get_service_key()
-    if not service_key:
-        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
-    api_url = get_api_url()
-    access_token = create_test_user(api_url, service_key)
+    api_url, access_token = resolve_test_auth()
     project_id = f'project-edit-staging-{uuid.uuid4().hex[:8]}'
     # first message
     requests.post(
@@ -382,11 +324,7 @@ def test_edit_staged_build_locked_after_promotion() -> None:
     """
     test editing a staged build fails once it starts processing.
     """
-    service_key = get_service_key()
-    if not service_key:
-        pytest.skip('SUPABASE_SERVICE_ROLE_KEY not set')
-    api_url = get_api_url()
-    access_token = create_test_user(api_url, service_key)
+    api_url, access_token = resolve_test_auth()
     project_id = f'project-edit-locked-{uuid.uuid4().hex[:8]}'
     # first message
     first_resp = requests.post(

@@ -4,103 +4,19 @@ Production integration flow: project -> chat -> build -> preview.
 from __future__ import annotations
 
 import json
-import os
 import time
 import uuid
-from pathlib import Path
 from urllib.parse import urljoin
 
 import pytest
 import requests
 
-
-def load_env_file(path: Path) -> dict[str, str]:
-    env: dict[str, str] = {}
-    if not path.exists():
-        return env
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].strip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        env[key.strip()] = value.strip()
-    return env
-
-
-def resolve_env() -> dict[str, str]:
-    env_file = Path(__file__).resolve().parents[1] / ".env.prod"
-    env = load_env_file(env_file)
-    if not env:
-        raise RuntimeError(f"missing env vars in {env_file}")
-    return env
-
-
-def resolve_api_url(supabase_url: str, env: dict[str, str]) -> str:
-    base = supabase_url.rstrip("/")
-    return env.get("API_URL") or f"{base}/functions/v1/api"
-
-
-def resolve_auth_url(supabase_url: str) -> str:
-    base = supabase_url.rstrip("/")
-    return f"{base}/auth/v1"
-
-
-def ensure_access_token(service_key: str, supabase_url: str) -> str:
-    email = f"prod-test-{uuid.uuid4().hex[:8]}@local.test"
-    password = f"TestPass-{uuid.uuid4().hex[:8]}!"
-    auth_url = resolve_auth_url(supabase_url)
-    admin_url = f"{auth_url}/admin/generate_link"
-    resp = requests.post(
-        admin_url,
-        json={"type": "signup", "email": email, "password": password},
-        headers={
-            "Authorization": f"Bearer {service_key}",
-            "apikey": service_key,
-            "Content-Type": "application/json",
-        },
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"failed to create test user: {resp.status_code} {resp.text}")
-    data = resp.json()
-    action_link = data.get("properties", {}).get("action_link") or data.get("action_link") or ""
-    access_token = None
-    if "access_token=" in action_link:
-        access_token = action_link.split("access_token=")[1].split("&")[0]
-    if not access_token and action_link:
-        try:
-            resp = requests.get(action_link, allow_redirects=False, timeout=10)
-            location = resp.headers.get("Location") or resp.headers.get("location") or ""
-            if "access_token=" in location:
-                access_token = location.split("access_token=")[1].split("&")[0]
-        except Exception:
-            access_token = None
-    if not access_token:
-        token_resp = requests.post(
-            f"{auth_url}/token?grant_type=password",
-            json={"email": email, "password": password},
-            headers={"apikey": service_key, "Content-Type": "application/json"},
-            timeout=10,
-        )
-        if token_resp.status_code == 200:
-            access_token = (token_resp.json() or {}).get("access_token")
-    if not access_token:
-        raise RuntimeError("access_token missing from auth response")
-    return access_token
-
-
-def ensure_credit_balance(api_url: str, access_token: str) -> None:
-    resp = requests.get(
-        f"{api_url}/billing/credits",
-        headers={"Authorization": f"Bearer {access_token}"},
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"failed to init credits: {resp.status_code} {resp.text}")
+from test.utils import (
+    ensure_access_token,
+    ensure_credit_balance,
+    resolve_api_url,
+    resolve_env,
+)
 
 
 def poll_build(api_url: str, build_id: str, timeout_s: int = 900) -> dict:

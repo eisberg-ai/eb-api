@@ -1,6 +1,8 @@
 // service rate mapping: service stub -> cost in dollars per request
 export const SERVICE_RATES: Record<string, number> = {
   // text generation
+  'claude-sonnet-4-5': 0.02,
+  'claude-opus-4-5': 0.05,
   'gpt-5.2': 0.02,
   'gpt-5.1': 0.01,
   'gpt-5': 0.01,
@@ -36,7 +38,6 @@ export const SERVICE_RATES: Record<string, number> = {
 export function getServiceRate(stub: string): number {
   return SERVICE_RATES[stub] ?? 0.0;
 }
-
 
 
 

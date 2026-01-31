@@ -4,6 +4,7 @@ import { getUserOrService } from "../lib/auth.ts";
 import { ensureProject, getCurrentWorkspaceId, DEFAULT_MODEL, isProModel, normalizeProjectStatus, validateModelStub } from "../lib/project.ts";
 import { callLLM } from "../lib/llm.ts";
 import { getServicesRegistry } from "../lib/registry.ts";
+import { sha256Hex } from "../lib/crypto.ts";
 
 async function generateTitleFromPrompt(prompt: string): Promise<string | null> {
   try {
@@ -143,28 +144,64 @@ async function handleDeleteEnvVar(req: Request, projectId: string, body: any) {
 const ALLOWED_SERVICE_STUBS = new Set(
   Object.values(getServicesRegistry()).flat().map((service) => service.stub),
 );
+const SERVICE_STUB_TYPES = new Map<string, string>();
+Object.entries(getServicesRegistry()).forEach(([type, services]) => {
+  services.forEach((service) => {
+    SERVICE_STUB_TYPES.set(service.stub, type);
+  });
+});
+
+function redactServiceConfig(rawConfig: any): { config: any; hasApiKey: boolean } {
+  if (!rawConfig || typeof rawConfig !== "object" || Array.isArray(rawConfig)) {
+    return { config: rawConfig ?? null, hasApiKey: false };
+  }
+  const config = { ...rawConfig };
+  let hasApiKey = false;
+  if ("apiKey" in config) {
+    hasApiKey = Boolean(config.apiKey);
+    delete config.apiKey;
+  }
+  if ("api_key" in config) {
+    hasApiKey = hasApiKey || Boolean(config.api_key);
+    delete config.api_key;
+  }
+  return { config, hasApiKey };
+}
 
 async function handleGetProjectServices(req: Request, projectId: string) {
   const auth = await getUserOrService(req, { allowServiceKey: true });
   const user = auth.user;
   const isService = auth.service;
-  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (!isService) return json({ error: "unauthorized" }, 401);
   const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
   if (!project) return json({ error: "not found" }, 404);
-  if (!isService && user && project.owner_user_id !== user.id) return json({ error: "forbidden" }, 403);
   const { data, error } = await admin
     .from("project_services")
-    .select("service_stub, config")
+    .select("service_stub, config, enabled, disabled_reason, disabled_at")
     .eq("project_id", projectId);
   if (error) return json({ error: error.message }, 500);
   const apiBaseUrl = getApiBaseUrl(req);
   const services = (data ?? []).map((row: any) => {
     const stub = row.service_stub;
-    const base: { stub: string; config: any; proxyEndpoint?: string } = {
+    const type = SERVICE_STUB_TYPES.get(stub) ?? null;
+    const { config } = redactServiceConfig(row.config);
+    const base: {
+      stub: string;
+      type: string | null;
+      config: any;
+      enabled: boolean;
+      disabledReason: string | null;
+      disabledAt: string | null;
+      proxyEndpoint?: string;
+    } = {
       stub,
-      config: row.config ?? null,
+      type,
+      config,
+      enabled: row.enabled ?? true,
+      disabledReason: row.disabled_reason ?? null,
+      disabledAt: row.disabled_at ?? null,
     };
-    if (apiBaseUrl && stub) base.proxyEndpoint = `${apiBaseUrl}/services/text/${stub}?projectId=${projectId}`;
+    if (apiBaseUrl && stub && type) base.proxyEndpoint = `${apiBaseUrl}/services/${type}/${stub}?projectId=${projectId}`;
     return base;
   });
   return json({ services });
@@ -174,17 +211,45 @@ async function handlePostProjectService(req: Request, projectId: string, body: a
   const auth = await getUserOrService(req, { allowServiceKey: true });
   const user = auth.user;
   const isService = auth.service;
-  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (!isService) return json({ error: "unauthorized" }, 401);
   const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
   if (!project) return json({ error: "not found" }, 404);
-  if (!isService && user && project.owner_user_id !== user.id) return json({ error: "forbidden" }, 403);
   const stub = body?.serviceStub ?? body?.service_stub ?? body?.stub;
   if (!stub || typeof stub !== "string") return json({ error: "serviceStub required" }, 400);
   if (!ALLOWED_SERVICE_STUBS.has(stub)) return json({ error: "unknown service stub" }, 400);
-  const config = body?.config ?? null;
+  const configProvided = Object.prototype.hasOwnProperty.call(body ?? {}, "config");
+  const rawConfig = body?.config ?? null;
+  if (configProvided && rawConfig !== null && (typeof rawConfig !== "object" || Array.isArray(rawConfig))) {
+    return json({ error: "config must be an object" }, 400);
+  }
+  let config = rawConfig ?? null;
+  if (configProvided && config !== null) {
+    config = redactServiceConfig(config).config;
+  }
+  let enabled: boolean | undefined;
+  if (body?.enabled !== undefined) {
+    if (typeof body.enabled !== "boolean") return json({ error: "enabled must be boolean" }, 400);
+    enabled = body.enabled;
+  }
+  const updates: Record<string, unknown> = {
+    project_id: projectId,
+    service_stub: stub,
+  };
+  if (configProvided) updates.config = config;
+  if (enabled !== undefined) {
+    updates.enabled = enabled;
+    if (enabled) {
+      updates.disabled_at = null;
+      updates.disabled_reason = null;
+      updates.enabled_at = new Date().toISOString();
+    } else {
+      updates.disabled_at = new Date().toISOString();
+      updates.disabled_reason = body?.disabledReason ?? body?.disabled_reason ?? "manual";
+    }
+  }
   const { error } = await admin
     .from("project_services")
-    .upsert({ project_id: projectId, service_stub: stub, config }, { onConflict: "project_id,service_stub" });
+    .upsert(updates, { onConflict: "project_id,service_stub" });
   if (error) return json({ error: error.message }, 500);
   return json({ ok: true });
 }
@@ -193,10 +258,9 @@ async function handleDeleteProjectService(req: Request, projectId: string, servi
   const auth = await getUserOrService(req, { allowServiceKey: true });
   const user = auth.user;
   const isService = auth.service;
-  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (!isService) return json({ error: "unauthorized" }, 401);
   const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
   if (!project) return json({ error: "not found" }, 404);
-  if (!isService && user && project.owner_user_id !== user.id) return json({ error: "forbidden" }, 403);
   const stub = serviceStub?.toString();
   if (!stub) return json({ error: "serviceStub required" }, 400);
   const { error } = await admin
@@ -206,6 +270,65 @@ async function handleDeleteProjectService(req: Request, projectId: string, servi
     .eq("service_stub", stub);
   if (error) return json({ error: error.message }, 500);
   return json({ ok: true });
+}
+
+function normalizeServiceStub(stub: string): string {
+  return stub
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
+}
+
+function randomHex(bytes = 16): string {
+  const buffer = crypto.getRandomValues(new Uint8Array(bytes));
+  return Array.from(buffer)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function buildServiceKeyName(stub: string): string {
+  return `EB_SERVICE_KEY_${normalizeServiceStub(stub)}`;
+}
+
+function generateServiceKeyValue(): string {
+  return randomHex(32);
+}
+
+async function handlePostProjectServiceKey(req: Request, projectId: string, serviceStub: string) {
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const isService = auth.service;
+  if (!isService) return json({ error: "unauthorized" }, 401);
+  const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
+  if (!project) return json({ error: "not found" }, 404);
+
+  const stub = serviceStub?.toString();
+  if (!stub) return json({ error: "serviceStub required" }, 400);
+  if (!ALLOWED_SERVICE_STUBS.has(stub)) return json({ error: "unknown service stub" }, 400);
+  const { data: enabledService } = await admin
+    .from("project_services")
+    .select("service_stub")
+    .eq("project_id", projectId)
+    .eq("service_stub", stub)
+    .maybeSingle();
+  if (!enabledService) return json({ error: "service not enabled for this project" }, 403);
+
+  const serviceKeyName = buildServiceKeyName(stub);
+  const serviceKey = generateServiceKeyValue();
+  const tokenHash = await sha256Hex(serviceKey);
+  const { error } = await admin
+    .from("project_service_tokens")
+    .upsert(
+      {
+        project_id: projectId,
+        service_stub: stub,
+        token_hash: tokenHash,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "project_id,service_stub" },
+    );
+  if (error) return json({ error: error.message }, 500);
+  return json({ serviceKeyName, serviceKey });
 }
 
 async function handleGetVersionSource(projectId: string, versionId: number) {
@@ -909,6 +1032,13 @@ export async function handleProjects(req: Request, segments: string[], url: URL,
     if (!projectId) return json({ error: "projectId required" }, 400);
     if (method === "GET") return handleGetProjectServices(req, projectId);
     if (method === "POST") return handlePostProjectService(req, projectId, body);
+  }
+  // POST /projects/{id}/services/{stub}/key
+  if (segments[2] === "services" && segments.length === 5 && segments[4] === "key") {
+    const projectId = segments[1];
+    const stub = segments[3];
+    if (!projectId) return json({ error: "projectId required" }, 400);
+    if (method === "POST") return handlePostProjectServiceKey(req, projectId, stub);
   }
   // DELETE /projects/{id}/services/{stub}
   if (segments[2] === "services" && segments.length === 4) {

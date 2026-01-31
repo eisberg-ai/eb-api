@@ -3,6 +3,8 @@ export interface ServiceDefinition {
   name: string;
   description?: string;
   config?: Record<string, any>;
+  provider?: string;
+  model?: string;
 }
 
 interface TextServiceConfig {
@@ -12,24 +14,27 @@ interface TextServiceConfig {
   maxTokens?: number;
 }
 
-const STUB_TO_MODEL: Record<string, { provider: string; model: string }> = {
-  'claude-sonnet-4-5': { provider: 'anthropic', model: 'claude-3-5-sonnet-20241022' },
-  'claude-opus-4-5': { provider: 'anthropic', model: 'claude-3-opus-20240229' },
-  'gpt-5.2': { provider: 'openai', model: 'gpt-4o-2024-11-20' },
-  'gemini-3-pro': { provider: 'google', model: 'gemini-2.0-flash-exp' },
-};
-
 export const textServices: ServiceDefinition[] = [
-  { stub: 'claude-sonnet-4-5', name: 'Sonnet 4.5', description: 'Best model from Anthropic' },
-  { stub: 'claude-opus-4-5', name: 'Opus 4.5', description: "Anthropic's best model for specialized reasoning tasks" },
-  { stub: 'gpt-5.2', name: 'GPT-5.2', description: 'The best model from OpenAI' },
-  { stub: 'gemini-3-pro', name: 'Gemini 3 Pro', description: 'The best model from Google' },
+  { stub: 'claude-opus-4-5', name: 'Opus 4.5', description: "Anthropic's best model for specialized reasoning tasks", provider: 'anthropic', model: 'claude-opus-4-5-20251101' },
+  { stub: 'claude-sonnet-4-5', name: 'Sonnet 4.5', description: 'Best model from Anthropic', provider: 'anthropic', model: 'claude-sonnet-4-5-20250929' },
+  { stub: 'gpt-5.2', name: 'GPT-5.2', description: 'The best model from OpenAI', provider: 'openai', model: 'gpt-5.2-chat-latest' },
+  { stub: 'gemini-3-pro', name: 'Gemini 3 Pro', description: 'The best model from Google', provider: 'google', model: 'gemini-3-pro-preview' },
 ];
 
+function getProviderApiKey(provider: string): string | null {
+  if (provider === "openai") return Deno.env.get("OPENAI_API_KEY") ?? null;
+  if (provider === "google") return Deno.env.get("GOOGLE_API_KEY") ?? null;
+  if (provider === "anthropic") return Deno.env.get("ANTHROPIC_API_KEY") ?? null;
+  if (provider === "deepseek") return Deno.env.get("DEEPSEEK_API_KEY") ?? null;
+  if (provider === "xai") return Deno.env.get("XAI_API_KEY") ?? null;
+  return null;
+}
+
 async function callOpenAI(messages: any[], config: TextServiceConfig) {
-  const apiKey = config.apiKey || Deno.env.get('OPENAI_API_KEY');
-  if (!apiKey) throw new Error('OPENAI_API_KEY not configured');
+  const apiKey = config.apiKey;
+  if (!apiKey) throw new Error('service_api_key_missing');
   const model = config.model || 'gpt-4o';
+  const supportsTemperature = !model.startsWith("gpt-5.2");
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -39,7 +44,7 @@ async function callOpenAI(messages: any[], config: TextServiceConfig) {
     body: JSON.stringify({
       model,
       messages,
-      temperature: config.temperature ?? 0.7,
+      ...(supportsTemperature ? { temperature: config.temperature ?? 0.7 } : {}),
       ...(config.maxTokens ? { max_tokens: config.maxTokens } : {}),
     }),
   });
@@ -51,8 +56,8 @@ async function callOpenAI(messages: any[], config: TextServiceConfig) {
 }
 
 async function callGoogle(messages: any[], config: TextServiceConfig) {
-  const apiKey = config.apiKey || Deno.env.get('GOOGLE_API_KEY');
-  if (!apiKey) throw new Error('GOOGLE_API_KEY not configured');
+  const apiKey = config.apiKey;
+  if (!apiKey) throw new Error('service_api_key_missing');
   const model = config.model || 'gemini-2.0-flash-exp';
   const contents: any[] = [];
   for (const m of messages) {
@@ -95,8 +100,8 @@ async function callGoogle(messages: any[], config: TextServiceConfig) {
 }
 
 async function callAnthropic(messages: any[], config: TextServiceConfig) {
-  const apiKey = config.apiKey || Deno.env.get('ANTHROPIC_API_KEY');
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not configured');
+  const apiKey = config.apiKey;
+  if (!apiKey) throw new Error('service_api_key_missing');
   const model = config.model || 'claude-3-5-sonnet-20241022';
   const systemMessage = messages.find(m => m.role === 'system');
   const conversationMessages = messages.filter(m => m.role !== 'system');
@@ -130,8 +135,8 @@ async function callAnthropic(messages: any[], config: TextServiceConfig) {
 }
 
 async function callDeepSeek(messages: any[], config: TextServiceConfig) {
-  const apiKey = config.apiKey || Deno.env.get('DEEPSEEK_API_KEY');
-  if (!apiKey) throw new Error('DEEPSEEK_API_KEY not configured');
+  const apiKey = config.apiKey;
+  if (!apiKey) throw new Error('service_api_key_missing');
   const model = config.model || 'deepseek-chat';
   const response = await fetch('https://api.deepseek.com/v1/chat/completions', {
     method: 'POST',
@@ -154,8 +159,8 @@ async function callDeepSeek(messages: any[], config: TextServiceConfig) {
 }
 
 async function callXAI(messages: any[], config: TextServiceConfig) {
-  const apiKey = config.apiKey || Deno.env.get('XAI_API_KEY');
-  if (!apiKey) throw new Error('XAI_API_KEY not configured');
+  const apiKey = config.apiKey;
+  if (!apiKey) throw new Error('service_api_key_missing');
   const model = config.model || 'grok-beta';
   const response = await fetch('https://api.x.ai/v1/chat/completions', {
     method: 'POST',
@@ -181,24 +186,36 @@ export function getTextServices(): ServiceDefinition[] {
   return textServices;
 }
 
+const textServiceMap = new Map(textServices.map((service) => [service.stub, service]));
+
 export async function proxyTextService(stub: string, req: Request, body: any): Promise<Response> {
-  const serviceInfo = STUB_TO_MODEL[stub];
+  const serviceInfo = textServiceMap.get(stub);
   if (!serviceInfo) {
     return new Response(JSON.stringify({ error: `unknown service stub: ${stub}` }), {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
     });
   }
-  const { provider, model: defaultModel } = serviceInfo;
+  const provider = serviceInfo.provider ?? "unknown";
+  const defaultModel = serviceInfo.model ?? serviceInfo.stub;
   const config: TextServiceConfig = {
-    apiKey: body.config?.apiKey,
+    apiKey: body.config?.apiKey ?? body.config?.api_key,
     model: body.config?.model || defaultModel,
     temperature: body.temperature ?? body.config?.temperature,
     maxTokens: body.maxTokens ?? body.max_tokens ?? body.config?.maxTokens,
   };
+  if (!config.apiKey) {
+    config.apiKey = getProviderApiKey(provider) ?? undefined;
+  }
   const messages = body.messages || [];
   if (!Array.isArray(messages) || messages.length === 0) {
     return new Response(JSON.stringify({ error: 'messages array required' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  if (!config.apiKey) {
+    return new Response(JSON.stringify({ error: 'service_key_missing' }), {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
     });
@@ -253,12 +270,3 @@ export async function proxyTextService(stub: string, req: Request, body: any): P
     });
   }
 }
-
-
-
-
-
-
-
-
-

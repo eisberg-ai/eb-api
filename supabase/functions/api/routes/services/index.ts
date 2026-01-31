@@ -15,6 +15,7 @@ import type { ServiceDefinition } from "./text.ts";
 import { getServiceRate } from "../../lib/serviceRates.ts";
 import { applyCreditDelta } from "../billing.ts";
 import { getServicesRegistry, getModelsRegistry } from "../../lib/registry.ts";
+import { sha256Hex } from "../../lib/crypto.ts";
 
 const serviceMap: Record<string, { getServices: () => ServiceDefinition[]; proxy: (stub: string, req: Request, body: any) => Promise<Response> }> = {
   text: { getServices: getTextServices, proxy: proxyTextService },
@@ -24,19 +25,29 @@ const serviceMap: Record<string, { getServices: () => ServiceDefinition[]; proxy
   data: { getServices: getDataServices, proxy: proxyDataService },
 };
 
+function stripProviderKeys(config: any): any {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return config ?? null;
+  const cleaned = { ...config };
+  if ("apiKey" in cleaned) delete cleaned.apiKey;
+  if ("api_key" in cleaned) delete cleaned.api_key;
+  return cleaned;
+}
+
 async function handleGetServices(req: Request, projectId?: string) {
   const { user } = await getUserOrService(req);
   const grouped = getServicesRegistry();
   if (projectId && user) {
     const { data: enabledServices } = await admin
       .from("project_services")
-      .select("service_stub")
+      .select("service_stub, enabled")
       .eq("project_id", projectId);
-    const enabledStubs = new Set((enabledServices ?? []).map((s: any) => s.service_stub));
+    const enabledStubs = new Map(
+      (enabledServices ?? []).map((s: any) => [s.service_stub, s.enabled ?? true]),
+    );
     Object.keys(grouped).forEach(type => {
       grouped[type] = grouped[type].map(service => ({
         ...service,
-        enabled: enabledStubs.has(service.stub),
+        enabled: enabledStubs.get(service.stub) ?? false,
       }));
     });
   }
@@ -51,30 +62,69 @@ async function handleGetServiceType(req: Request, type: string, projectId?: stri
   if (projectId && user) {
     const { data: enabledServices } = await admin
       .from("project_services")
-      .select("service_stub")
+      .select("service_stub, enabled")
       .eq("project_id", projectId);
-    const enabledStubs = new Set((enabledServices ?? []).map((s: any) => s.service_stub));
+    const enabledStubs = new Map(
+      (enabledServices ?? []).map((s: any) => [s.service_stub, s.enabled ?? true]),
+    );
     return json(services.map(service => ({
       ...service,
-      enabled: enabledStubs.has(service.stub),
+      enabled: enabledStubs.get(service.stub) ?? false,
     })));
   }
   return json(services);
 }
 
-async function handleProxyService(req: Request, type: string, stub: string, projectId: string) {
-  const { user } = await getUserOrService(req);
-  if (!user) return json({ error: "unauthorized" }, 401);
+async function requireServiceAuth(req: Request, projectId: string, serviceStub: string) {
+  const token = req.headers.get("x-project-service-key");
+  if (token) {
+    const tokenHash = await sha256Hex(token);
+    const { data: tokenRow } = await admin
+      .from("project_service_tokens")
+      .select("project_id")
+      .eq("project_id", projectId)
+      .eq("service_stub", serviceStub)
+      .eq("token_hash", tokenHash)
+      .maybeSingle();
+    if (!tokenRow) return { user: null };
+    await admin
+      .from("project_service_tokens")
+      .update({ last_used_at: new Date().toISOString() })
+      .eq("project_id", projectId)
+      .eq("service_stub", serviceStub)
+      .eq("token_hash", tokenHash);
+    return { user: null, tokenValid: true };
+  }
+  return { user: null, tokenValid: false };
+}
+
+async function handleProxyService(req: Request, type: string, stub: string, projectId: string, body: any) {
+  const auth = await requireServiceAuth(req, projectId, stub);
+  if (!auth.user && !auth.tokenValid) return json({ error: "unauthorized" }, 401);
   const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
   if (!project) return json({ error: "project not found" }, 404);
+  if (auth.user) {
+    const { data: memberRows } = await admin
+      .from("project_members")
+      .select("user_id")
+      .eq("project_id", projectId)
+      .eq("user_id", auth.user.id)
+      .limit(1);
+    const isOwner = project.owner_user_id === auth.user.id;
+    const isMember = (memberRows ?? []).length > 0;
+    if (!isOwner && !isMember) return json({ error: "forbidden" }, 403);
+  }
   const { data: projectService } = await admin
     .from("project_services")
-    .select("config")
+    .select("config, enabled, disabled_reason")
     .eq("project_id", projectId)
     .eq("service_stub", stub)
     .single();
   if (!projectService) {
     return json({ error: "service not enabled for this project" }, 403);
+  }
+  if (projectService.enabled === false) {
+    return json({ error: "service_disabled", reason: projectService.disabled_reason ?? null }, 403);
   }
   const serviceHandler = serviceMap[type];
   if (!serviceHandler) return json({ error: "invalid service type" }, 400);
@@ -90,13 +140,27 @@ async function handleProxyService(req: Request, type: string, stub: string, proj
         idempotencyKey: `service-${projectId}-${stub}-${Date.now()}`,
       });
     } catch (err: any) {
+      const message = (err?.message ?? "").toString();
+      const isInsufficient = message.toLowerCase().includes("insufficient");
+      if (isInsufficient) {
+        await admin
+          .from("project_services")
+          .update({
+            enabled: false,
+            disabled_at: new Date().toISOString(),
+            disabled_reason: "insufficient_balance",
+          })
+          .eq("project_id", projectId)
+          .eq("service_stub", stub);
+        return json({ error: "insufficient_balance", disabled: true }, 400);
+      }
       console.error("failed to charge for service", err);
-      return json({ error: "insufficient_balance" }, 400);
+      return json({ error: "credit_charge_failed" }, 500);
     }
   }
-  const rawBody = await req.text().catch(() => "");
-  const body = rawBody ? JSON.parse(rawBody) : {};
-  const response = await serviceHandler.proxy(stub, req, { ...body, config: projectService.config });
+  const resolvedBody = body ?? {};
+  const safeConfig = stripProviderKeys(projectService.config);
+  const response = await serviceHandler.proxy(stub, req, { ...resolvedBody, config: safeConfig });
   return response;
 }
 
@@ -106,10 +170,44 @@ async function handleGetModels(req: Request) {
   return json({ models });
 }
 
+async function handleValidateServices(req: Request, body: any) {
+  await getUserOrService(req);
+  const services = body?.services;
+  if (!Array.isArray(services)) {
+    return json({ error: "services array required" }, 400);
+  }
+  const registry = getServicesRegistry();
+  const stubMap = new Map<string, { type: string; name: string }>();
+  Object.entries(registry).forEach(([type, entries]) => {
+    entries.forEach(service => {
+      stubMap.set(service.stub, { type, name: service.name });
+    });
+  });
+  const normalized: Array<{ stub: string; type: string; name: string }> = [];
+  const errors: Array<{ index: number; error: string; stub?: string }> = [];
+  services.forEach((svc: any, index: number) => {
+    const stub = svc?.stub || svc?.serviceStub || svc?.service_stub || svc?.name;
+    if (!stub || typeof stub !== "string") {
+      errors.push({ index, error: "service stub required" });
+      return;
+    }
+    const info = stubMap.get(stub);
+    if (!info) {
+      errors.push({ index, error: "unknown service stub", stub });
+      return;
+    }
+    normalized.push({ stub, type: info.type, name: info.name });
+  });
+  return json({ valid: errors.length === 0, errors, services: normalized });
+}
+
 export async function handleServices(req: Request, segments: string[], url: URL, body: any) {
   const method = req.method.toUpperCase();
   if (segments[0] !== "services") return null;
   const projectId = url.searchParams.get("projectId") || undefined;
+  if (method === "POST" && segments.length === 2 && segments[1] === "validate") {
+    return handleValidateServices(req, body);
+  }
   if (method === "GET" && segments.length === 1) {
     return handleGetServices(req, projectId);
   }
@@ -125,17 +223,8 @@ export async function handleServices(req: Request, segments: string[], url: URL,
     const stub = segments[2];
     const proxyProjectId = url.searchParams.get("projectId");
     if (!proxyProjectId) return json({ error: "projectId required" }, 400);
-    return handleProxyService(req, type, stub, proxyProjectId);
+    return handleProxyService(req, type, stub, proxyProjectId, body);
   }
   return null;
 }
-
-
-
-
-
-
-
-
-
 

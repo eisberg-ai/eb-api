@@ -8,7 +8,7 @@ const FUNCTIONS_URL = `${SUPABASE_URL}/functions/v1/api`;
 const DEFAULT_PASSWORD = 'TestPassword123!';
 
 if (!ANON_KEY || !SERVICE_ROLE_KEY) {
-  throw new Error('SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY are required');
+  throw new Error('SUPABASE_ANON_KEY and SUPABASE_SERVICE_ROLE_KEY are required.');
 }
 
 async function requestJson(url, { method = 'GET', token, apiKey, body, expectStatus } = {}) {
