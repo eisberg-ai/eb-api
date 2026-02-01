@@ -9,6 +9,7 @@ export type LlmPricing = {
 // Map product-facing model stubs to priced provider model identifiers.
 // Keep these in sync with `ALLOWED_MODELS` / UI stubs.
 const MODEL_STUB_TO_PRICING_MODEL: Record<string, string> = {
+  "claude-haiku-4-5": "anthropic/claude-3-5-haiku-20241022",
   "claude-sonnet-4-5": "anthropic/claude-3-5-sonnet-20241022",
   "claude-opus-4-5": "anthropic/claude-3-opus-20240229",
   "gpt-5.2": "openai/gpt-4o-2024-11-20",
@@ -20,6 +21,7 @@ export const DEFAULT_LLM_PRICING: LlmPricing[] = [
   { model: "deepseek/deepseek-chat", inputUsdPer1M: 0.14, outputUsdPer1M: 0.28 },
   { model: "openai/gpt-4o-mini", inputUsdPer1M: 0.15, outputUsdPer1M: 0.60 },
   { model: "openai/gpt-4o-2024-11-20", inputUsdPer1M: 5.0, outputUsdPer1M: 15.0 },
+  { model: "anthropic/claude-3-5-haiku-20241022", inputUsdPer1M: 0.8, outputUsdPer1M: 4.0 },
   { model: "anthropic/claude-3-5-sonnet-20241022", inputUsdPer1M: 3.0, outputUsdPer1M: 15.0 },
   { model: "anthropic/claude-3-opus-20240229", inputUsdPer1M: 15.0, outputUsdPer1M: 75.0 },
   { model: "google/gemini-2.0-flash-exp", inputUsdPer1M: 0.1, outputUsdPer1M: 0.4 },

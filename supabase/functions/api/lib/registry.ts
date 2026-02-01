@@ -16,6 +16,13 @@ export interface ModelDefinition {
 
 export const models: ModelDefinition[] = [
   {
+    id: 'claude-haiku-4-5',
+    name: 'Haiku 4.5',
+    provider: 'Anthropic',
+    description: 'Fast, affordable model from Anthropic',
+    icon: 'Brain',
+  },
+  {
     id: 'claude-sonnet-4-5',
     name: 'Sonnet 4.5',
     provider: 'Anthropic',

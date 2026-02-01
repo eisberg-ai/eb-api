@@ -573,6 +573,8 @@ async function buildProjectPayload(projectId: string, userId?: string) {
     current_version_id: project.current_version_number,
     latest_build_id: project.latest_build_id,
     status: project.status ?? null,
+    backend_enabled: !!project.backend_enabled,
+    backend_app_id: project.backend_app_id ?? null,
     chat_history: visibleMessages,
     env_vars: envVars ?? [],
     versions: (versions ?? []).map((v) => ({
@@ -781,23 +783,32 @@ async function handleGetProject(req: Request, projectId: string) {
 }
 
 async function handlePostProject(req: Request, body: any) {
-  const { user } = await getUserOrService(req);
-  if (!user) return json({ error: "unauthorized" }, 401);
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  const isService = auth.service;
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
   const projectId = body.id || `project-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   let name = body.name || body.title || "New Project";
+  const ownerUserId = user?.id ?? body.owner_user_id ?? body.ownerUserId ?? null;
+  if (isService && !ownerUserId) {
+    return json({ error: "owner_user_id_required" }, 400);
+  }
   // accept model from body, fall back to default
   const model = validateModelStub(body.model) ?? DEFAULT_MODEL;
-  const { data: subscription, error: subscriptionError } = await admin
-    .from("user_subscriptions")
-    .select("plan_key")
-    .eq("user_id", user.id)
-    .maybeSingle();
-  if (subscriptionError) {
-    console.error("[projects] subscription lookup error", subscriptionError);
-  }
-  const planKey = subscription?.plan_key ?? "free";
-  if (planKey === "free" && isProModel(model)) {
-    return json({ error: "model_requires_plan", message: "Upgrade required for this model." }, 403);
+  let planKey = "free";
+  if (user) {
+    const { data: subscription, error: subscriptionError } = await admin
+      .from("user_subscriptions")
+      .select("plan_key")
+      .eq("user_id", user.id)
+      .maybeSingle();
+    if (subscriptionError) {
+      console.error("[projects] subscription lookup error", subscriptionError);
+    }
+    planKey = subscription?.plan_key ?? "free";
+    if (planKey === "free" && isProModel(model)) {
+      return json({ error: "model_requires_plan", message: "Upgrade required for this model." }, 403);
+    }
   }
   const isPublic = body.is_public ?? body.isPublic ?? false;
   let workspaceId = body.workspace_id ?? body.workspaceId ?? null;
@@ -808,10 +819,10 @@ async function handlePostProject(req: Request, body: any) {
       name = generatedName.trim();
     }
   }
-  await ensureProject(projectId, user.id);
+  await ensureProject(projectId, ownerUserId || undefined);
   // default to user's current workspace if not provided
-  if (!workspaceId) {
-    workspaceId = await getCurrentWorkspaceId(user.id);
+  if (!workspaceId && ownerUserId) {
+    workspaceId = await getCurrentWorkspaceId(ownerUserId);
   }
   const updateData: any = {
     updated_at: new Date().toISOString(),
@@ -981,6 +992,41 @@ async function handlePatchProject(req: Request, projectId: string, body: any) {
     if (!build) return json({ error: "Version not found" }, 404);
     updates.current_version_number = versionNumber;
     updates.latest_build_id = build.id;
+  }
+  const backendEnabledRaw = body.backend_enabled ?? body.backendEnabled;
+  if (backendEnabledRaw !== undefined) {
+    if (typeof backendEnabledRaw !== "boolean") {
+      return json({ error: "backend_enabled invalid" }, 400);
+    }
+    if (backendEnabledRaw) {
+      const { data: project, error: projectErr } = await admin
+        .from("projects")
+        .select("owner_user_id, backend_enabled, backend_app_id")
+        .eq("id", projectId)
+        .single();
+      if (projectErr) return json({ error: projectErr.message }, 500);
+      if (!project) return json({ error: "not found" }, 404);
+      if (!isService && user && project.owner_user_id !== user.id) {
+        return json({ error: "forbidden" }, 403);
+      }
+      const backendAppId = project.backend_app_id ?? crypto.randomUUID();
+      const { error: schemaErr } = await admin.rpc("create_app_schema", {
+        app_id: backendAppId,
+        create_items: true,
+      });
+      if (schemaErr) return json({ error: "backend_setup_failed", message: schemaErr.message }, 500);
+      const { error: appUserErr } = await admin
+        .from("app_users")
+        .upsert(
+          { app_id: backendAppId, user_id: project.owner_user_id, role: "owner" },
+          { onConflict: "app_id,user_id" },
+        );
+      if (appUserErr) return json({ error: "backend_setup_failed", message: appUserErr.message }, 500);
+      updates.backend_enabled = true;
+      updates.backend_app_id = backendAppId;
+    } else {
+      updates.backend_enabled = false;
+    }
   }
   // service calls can update any project; user calls require ownership
   let query = admin.from("projects").update(updates).eq("id", projectId);

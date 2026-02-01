@@ -24,27 +24,32 @@ def load_env_file(path: Path) -> dict[str, str]:
     return env
 
 
-def apply_userland_overrides(env: dict[str, str]) -> None:
-    if env.get("USERLAND_SUPABASE_URL"):
-        env["SUPABASE_URL"] = env["USERLAND_SUPABASE_URL"]
-    if env.get("USERLAND_SUPABASE_ANON_KEY"):
-        env["SUPABASE_ANON_KEY"] = env["USERLAND_SUPABASE_ANON_KEY"]
-    if env.get("USERLAND_SUPABASE_SERVICE_ROLE_KEY"):
-        env["SUPABASE_SERVICE_ROLE_KEY"] = env["USERLAND_SUPABASE_SERVICE_ROLE_KEY"]
-    if env.get("USERLAND_API_URL"):
-        env["API_URL"] = env["USERLAND_API_URL"]
+def apply_backend_base_overrides(env: dict[str, str]) -> None:
+    if env.get("BACKEND_BASE_URL"):
+        env["SUPABASE_URL"] = env["BACKEND_BASE_URL"]
+    if env.get("BACKEND_BASE_ANON_KEY"):
+        env["SUPABASE_ANON_KEY"] = env["BACKEND_BASE_ANON_KEY"]
+    if env.get("BACKEND_BASE_SERVICE_ROLE_KEY"):
+        env["SUPABASE_SERVICE_ROLE_KEY"] = env["BACKEND_BASE_SERVICE_ROLE_KEY"]
+    if env.get("BACKEND_BASE_API_URL"):
+        env["API_URL"] = env["BACKEND_BASE_API_URL"]
 
 
 def resolve_env() -> dict[str, str]:
     env = dict(os.environ)
-    apply_userland_overrides(env)
+    apply_backend_base_overrides(env)
     if env.get("SUPABASE_URL") and env.get("SUPABASE_SERVICE_ROLE_KEY"):
         return env
     root = Path(__file__).resolve().parents[1]
+    env_file_override = env.get("EB_API_ENV_FILE")
+    if env_file_override:
+        env.update(load_env_file(Path(env_file_override)))
+        apply_backend_base_overrides(env)
+        return env
     env.update(load_env_file(root / ".env.local"))
     env.update(load_env_file(root / ".env.prod"))
-    # Allow userland-specific overrides for running tests against a separate project.
-    apply_userland_overrides(env)
+    # Allow backend base overrides for running tests against a separate project.
+    apply_backend_base_overrides(env)
     return env
 
 

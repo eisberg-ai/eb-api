@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ROOT}/.env.prod"
-PROJECT_REF="${USERLAND_SUPABASE_PROJECT_REF:-}"
+PROJECT_REF="${BACKEND_BASE_PROJECT_REF:-}"
 
 echo "setup-userland: using env file ${ENV_FILE}"
 
@@ -55,38 +55,38 @@ out_file = Path(sys.argv[2])
 env = load_env_file(env_file)
 
 for key in (
-    "USERLAND_SUPABASE_URL",
-    "USERLAND_SUPABASE_ANON_KEY",
-    "USERLAND_SUPABASE_SERVICE_ROLE_KEY",
-    "USERLAND_API_URL",
-    "USERLAND_SUPABASE_PROJECT_REF",
-    "USERLAND_SUPABASE_PROJECT_ID",
+    "BACKEND_BASE_URL",
+    "BACKEND_BASE_ANON_KEY",
+    "BACKEND_BASE_SERVICE_ROLE_KEY",
+    "BACKEND_BASE_API_URL",
+    "BACKEND_BASE_PROJECT_REF",
+    "BACKEND_BASE_PROJECT_ID",
 ):
     if os.environ.get(key):
         env[key] = os.environ[key]
 
-userland_url = env.get("USERLAND_SUPABASE_URL", "")
-userland_anon = env.get("USERLAND_SUPABASE_ANON_KEY", "")
-userland_service = env.get("USERLAND_SUPABASE_SERVICE_ROLE_KEY", "")
+userland_url = env.get("BACKEND_BASE_URL", "")
+userland_anon = env.get("BACKEND_BASE_ANON_KEY", "")
+userland_service = env.get("BACKEND_BASE_SERVICE_ROLE_KEY", "")
 platform_url = env.get("SUPABASE_URL", "")
 
 missing = [k for k, v in {
-    "USERLAND_SUPABASE_URL": userland_url,
-    "USERLAND_SUPABASE_ANON_KEY": userland_anon,
-    "USERLAND_SUPABASE_SERVICE_ROLE_KEY": userland_service,
+    "BACKEND_BASE_URL": userland_url,
+    "BACKEND_BASE_ANON_KEY": userland_anon,
+    "BACKEND_BASE_SERVICE_ROLE_KEY": userland_service,
 }.items() if not v]
 if missing:
     raise SystemExit(f"missing required keys in {env_file}: {', '.join(missing)}")
 
 userland_ref = (
-    env.get("USERLAND_SUPABASE_PROJECT_REF")
-    or env.get("USERLAND_SUPABASE_PROJECT_ID")
+    env.get("BACKEND_BASE_PROJECT_REF")
+    or env.get("BACKEND_BASE_PROJECT_ID")
     or project_ref_from_url(userland_url)
 )
 platform_ref = project_ref_from_url(platform_url)
 
 if not userland_ref:
-    raise SystemExit("missing USERLAND_SUPABASE_PROJECT_REF (or USERLAND_SUPABASE_PROJECT_ID)")
+    raise SystemExit("missing BACKEND_BASE_PROJECT_REF (or BACKEND_BASE_PROJECT_ID)")
 if platform_ref and userland_ref == platform_ref:
     raise SystemExit("userland project ref matches platform SUPABASE_URL; refusing to proceed")
 if platform_url.strip("/").lower() == userland_url.strip("/").lower():
@@ -95,10 +95,10 @@ if platform_url.strip("/").lower() == userland_url.strip("/").lower():
 env["SUPABASE_URL"] = userland_url
 env["SUPABASE_ANON_KEY"] = userland_anon
 env["SUPABASE_SERVICE_ROLE_KEY"] = userland_service
-env["API_URL"] = env.get("USERLAND_API_URL") or f"{userland_url.rstrip('/')}/functions/v1/api"
+env["API_URL"] = env.get("BACKEND_BASE_API_URL") or f"{userland_url.rstrip('/')}/functions/v1/api"
 
 for key in list(env.keys()):
-    if key.startswith("USERLAND_"):
+    if key.startswith("BACKEND_BASE_"):
         env.pop(key, None)
 
 with out_file.open("w", encoding="utf-8") as handle:
@@ -114,7 +114,7 @@ if [[ -z "${PROJECT_REF}" ]]; then
 fi
 
 if [[ -z "${PROJECT_REF}" ]]; then
-  echo "USERLAND_SUPABASE_PROJECT_REF is required to link the userland Supabase project." >&2
+  echo "BACKEND_BASE_PROJECT_REF is required to link the backend Supabase project." >&2
   exit 1
 fi
 
