@@ -1,13 +1,42 @@
 """E2E test fixtures for full app lifecycle tests."""
 from __future__ import annotations
 
+import os
 import uuid
+from pathlib import Path
 from typing import Any, Generator
 
 import pytest
 import requests
 
-from test.utils import approve_user, auth_headers, resolve_api_url, resolve_env, sign_up_user
+from test.utils import approve_user, auth_headers, load_env_file, resolve_api_url, resolve_env, sign_up_user
+
+
+def _get_eb_api_supabase_config() -> dict[str, str]:
+    """Get eb-api's Supabase config (before any userland overrides).
+
+    The vms table, users, projects, and builds all live in eb-api's database.
+    This function reads .env.local directly to get the original values,
+    avoiding the BACKEND_BASE_URL override that points to eb-userland.
+    """
+    # First check explicit env vars
+    result = {
+        "url": os.environ.get("EB_API_SUPABASE_URL"),
+        "service_key": os.environ.get("EB_API_SERVICE_ROLE_KEY"),
+        "anon_key": os.environ.get("EB_API_SUPABASE_ANON_KEY"),
+    }
+    if all(result.values()):
+        result["url"] = result["url"].rstrip("/")
+        return result
+
+    # Read .env.local directly (before apply_backend_base_overrides)
+    root = Path(__file__).resolve().parents[2]
+    local_env = load_env_file(root / ".env.local")
+
+    result["url"] = (result["url"] or local_env.get("SUPABASE_URL") or "http://127.0.0.1:54321").rstrip("/")
+    result["service_key"] = result["service_key"] or local_env.get("SUPABASE_SERVICE_ROLE_KEY") or ""
+    result["anon_key"] = result["anon_key"] or local_env.get("SUPABASE_ANON_KEY") or ""
+    return result
 
 
 def _check_api_health(api_url: str) -> tuple[bool, str]:
@@ -77,9 +106,14 @@ def env() -> dict[str, str]:
 @pytest.fixture(scope="module", autouse=True)
 def check_prerequisites(env: dict[str, str]) -> None:
     """Verify all required services are running before e2e tests execute."""
+    # Get eb-api's Supabase config (where vms table lives, before userland overrides)
+    eb_api_config = _get_eb_api_supabase_config()
+    eb_api_supabase_url = eb_api_config["url"]
+    eb_api_service_key = eb_api_config["service_key"]
+
+    # For API calls, use the potentially-overridden env
     supabase_url = (env.get("SUPABASE_URL") or "http://127.0.0.1:54321").rstrip("/")
     api_url = resolve_api_url(supabase_url, env)
-    service_key = env.get("SUPABASE_SERVICE_ROLE_KEY")
     userland_url = env.get("BACKEND_BASE_URL")
 
     print("\n=== E2E Prerequisites Check ===")
@@ -103,9 +137,9 @@ def check_prerequisites(env: dict[str, str]) -> None:
     else:
         print("  eb-userland: skipped (BACKEND_BASE_URL not set)")
 
-    # Check 3: VMs available (only if we have service key)
-    if service_key:
-        vm_ok, vm_msg = _check_vms_available(supabase_url, service_key)
+    # Check 3: VMs available in eb-api Supabase (not userland)
+    if eb_api_service_key:
+        vm_ok, vm_msg = _check_vms_available(eb_api_supabase_url, eb_api_service_key)
         print(f"  VM pool: {vm_msg}")
         if not vm_ok:
             print("\n  To start a VM locally (Docker, recommended):")
@@ -121,28 +155,33 @@ def check_prerequisites(env: dict[str, str]) -> None:
 
 
 @pytest.fixture(scope="module")
-def supabase_url(env: dict[str, str]) -> str:
-    return (env.get("SUPABASE_URL") or "http://127.0.0.1:54321").rstrip("/")
+def supabase_url() -> str:
+    """Return eb-api's Supabase URL (not userland's)."""
+    return _get_eb_api_supabase_config()["url"]
 
 
 @pytest.fixture(scope="module")
-def api_url(supabase_url: str, env: dict[str, str]) -> str:
-    return resolve_api_url(supabase_url, env)
+def api_url(supabase_url: str) -> str:
+    """Return eb-api's API URL (not userland's)."""
+    # Use eb-api's local Supabase API, not the userland override
+    return f"{supabase_url}/functions/v1/api"
 
 
 @pytest.fixture(scope="module")
-def anon_key(env: dict[str, str]) -> str:
-    key = env.get("SUPABASE_ANON_KEY")
+def anon_key() -> str:
+    """Return eb-api's anon key (not userland's)."""
+    key = _get_eb_api_supabase_config()["anon_key"]
     if not key:
-        pytest.skip("SUPABASE_ANON_KEY required for e2e tests")
+        pytest.skip("SUPABASE_ANON_KEY required for e2e tests (check .env.local)")
     return key
 
 
 @pytest.fixture(scope="module")
-def service_key(env: dict[str, str]) -> str:
-    key = env.get("SUPABASE_SERVICE_ROLE_KEY")
+def service_key() -> str:
+    """Return eb-api's service key (not userland's)."""
+    key = _get_eb_api_supabase_config()["service_key"]
     if not key:
-        pytest.skip("SUPABASE_SERVICE_ROLE_KEY required for e2e tests")
+        pytest.skip("SUPABASE_SERVICE_ROLE_KEY required for e2e tests (check .env.local)")
     return key
 
 

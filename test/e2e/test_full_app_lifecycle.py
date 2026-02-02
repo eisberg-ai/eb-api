@@ -112,15 +112,17 @@ def test_full_app_lifecycle(
     # Step 2: Send prompt with services and backend attachments
     print("[e2e] Step 2: Sending prompt with services/backend...")
 
-    # The "big ol' prompt" - complex enough to exercise services and backend
-    prompt = """
-    Build a task management app with the following features:
-    - A list of tasks with title, description, and due date
-    - Ability to mark tasks as complete
-    - Store tasks in the backend database
-    - Generate task summaries using AI text services
-    - Beautiful modern UI with animations
-    """
+    # TODO: we'll want to have something like this soon + lots of attachments.
+    # # The "big ol' prompt" - complex enough to exercise services and backend
+    # prompt = """
+    # Build a task management app with the following features:
+    # - A list of tasks with title, description, and due date
+    # - Ability to mark tasks as complete
+    # - Store tasks in the backend database
+    # - Generate task summaries using AI text services
+    # - Beautiful modern UI with animations
+    # """
+    prompt = "Build an super basic AI chat page for cooking recipes"
 
     chat_payload = {
         "project_id": project_id,

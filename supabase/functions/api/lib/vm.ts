@@ -2,6 +2,20 @@ import { admin } from "./env.ts";
 
 export type VmMode = "stopped" | "serving" | "building";
 
+/**
+ * Rewrite localhost URLs to host.docker.internal for local dev.
+ * Supabase edge functions run in Docker, so localhost refers to the container,
+ * not the host machine. We detect localhost URLs and rewrite them.
+ */
+function rewriteUrlForDocker(url: string): string {
+  if (url.includes("localhost") || url.includes("127.0.0.1")) {
+    return url
+      .replace("http://localhost", "http://host.docker.internal")
+      .replace("http://127.0.0.1", "http://host.docker.internal");
+  }
+  return url;
+}
+
 type VmRow = {
   id: string;
   project_id: string | null;
@@ -20,7 +34,7 @@ const heartbeatTtlSec = Number(Deno.env.get("VM_HEARTBEAT_TTL_SEC") ?? "90");
 const leaseSec = Number(Deno.env.get("VM_LEASE_SEC") ?? "900");
 
 function buildWakeUrl(baseUrl: string) {
-  const trimmed = baseUrl.replace(/\/+$/g, "");
+  const trimmed = rewriteUrlForDocker(baseUrl.replace(/\/+$/g, ""));
   const path = wakePath.startsWith("/") ? wakePath : `/${wakePath}`;
   return `${trimmed}${path}`;
 }
