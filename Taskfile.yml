@@ -85,3 +85,32 @@ tasks:
     desc: open Supabase Studio UI in browser
     cmds:
       - supabase studio
+
+  ###
+  # Tests
+  ###
+
+  test:
+    desc: run all tests (unit + integration)
+    cmds:
+      - pytest test/ -v --ignore=test/e2e --ignore=test/cloud
+
+  test:integration:
+    desc: run integration tests (requires local Supabase)
+    cmds:
+      - pytest test/integration/ -v -m integration
+
+  test:e2e:local:
+    desc: run e2e tests against local environment
+    cmds:
+      - |
+        echo "Running e2e tests against local environment..."
+        echo "Prerequisites: supabase running (task start), VMs registered"
+        pytest test/e2e/ -v -m e2e -s
+
+  test:e2e:prod:
+    desc: run e2e tests against production
+    cmds:
+      - |
+        echo "Running e2e tests against production..."
+        EB_API_ENV_FILE=.env.prod pytest test/e2e/ -v -m e2e -s

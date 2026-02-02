@@ -6,11 +6,44 @@ import uuid
 
 import pytest
 
-from test.userland.conftest import (
+from test.utils import (
     approve_user,
     request_json,
+    resolve_api_url,
+    resolve_env,
     sign_up_user,
 )
+
+
+@pytest.fixture(scope='module')
+def env() -> dict[str, str]:
+    return resolve_env()
+
+
+@pytest.fixture(scope='module')
+def supabase_url(env: dict[str, str]) -> str:
+    return (env.get('SUPABASE_URL') or 'http://127.0.0.1:54321').rstrip('/')
+
+
+@pytest.fixture(scope='module')
+def api_url(supabase_url: str, env: dict[str, str]) -> str:
+    return resolve_api_url(supabase_url, env)
+
+
+@pytest.fixture(scope='module')
+def anon_key(env: dict[str, str]) -> str:
+    key = env.get('SUPABASE_ANON_KEY')
+    if not key:
+        pytest.skip('SUPABASE_ANON_KEY required for userland tests')
+    return key
+
+
+@pytest.fixture(scope='module')
+def service_key(env: dict[str, str]) -> str:
+    key = env.get('SUPABASE_SERVICE_ROLE_KEY')
+    if not key:
+        pytest.skip('SUPABASE_SERVICE_ROLE_KEY required for userland tests')
+    return key
 
 
 def _create_project(api_url: str, anon_key: str, token: str, project_id: str) -> dict:

@@ -499,5 +499,109 @@ export async function handleAdmin(req: Request, segments: string[], url: URL, bo
   if (req.method === "POST" && segments[1] === "users" && segments[3] === "approval") {
     return handleUserApproval(gate.user, segments[2], body);
   }
+  // GET /admin/leaderboard - Agent performance leaderboard
+  if (req.method === "GET" && segments[1] === "leaderboard") return handleLeaderboard(url);
+  // PATCH /admin/leaderboard/{buildId}/scores - Update build scores
+  if (req.method === "PATCH" && segments[1] === "leaderboard" && segments[3] === "scores") {
+    return handleUpdateBuildScores(segments[2], body);
+  }
   return json({ error: "not found" }, 404);
+}
+
+// Leaderboard: Compare agent performance across builds
+async function handleLeaderboard(url: URL) {
+  const { limit, offset } = parsePagination(url, { limit: 50, max: 200 });
+  const agentVersion = url.searchParams.get("agent_version");
+  const model = url.searchParams.get("model");
+  const status = url.searchParams.get("status") || "succeeded";
+
+  let query = admin
+    .from("builds")
+    .select(`
+      id,
+      project_id,
+      agent_version,
+      model,
+      status,
+      started_at,
+      ended_at,
+      usage_summary,
+      langfuse_trace_id,
+      scores,
+      artifacts,
+      projects!inner(id, name, owner_user_id)
+    `)
+    .eq("status", status)
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (agentVersion) query = query.eq("agent_version", agentVersion);
+  if (model) query = query.eq("model", model);
+
+  const { data, error, count } = await query;
+  if (error) {
+    console.error("[admin] leaderboard error", error);
+    return json({ error: error.message }, 500);
+  }
+
+  // Calculate duration and format response
+  const builds = (data ?? []).map((b: any) => {
+    const startedAt = b.started_at ? new Date(b.started_at).getTime() : null;
+    const endedAt = b.ended_at ? new Date(b.ended_at).getTime() : null;
+    const durationS = startedAt && endedAt ? (endedAt - startedAt) / 1000 : null;
+    const usage = b.usage_summary ?? {};
+    return {
+      id: b.id,
+      project_id: b.project_id,
+      project_name: b.projects?.name ?? null,
+      agent_version: b.agent_version,
+      model: b.model,
+      status: b.status,
+      started_at: b.started_at,
+      ended_at: b.ended_at,
+      duration_s: durationS,
+      // Usage metrics
+      total_input_tokens: usage.total_input_tokens ?? null,
+      total_output_tokens: usage.total_output_tokens ?? null,
+      total_calls: usage.total_calls ?? null,
+      total_cost_usd: usage.total_charged_usd ?? null,
+      // Links
+      langfuse_trace_id: b.langfuse_trace_id,
+      langfuse_url: b.langfuse_trace_id
+        ? `https://cloud.langfuse.com/trace/${b.langfuse_trace_id}`
+        : null,
+      preview_url: b.artifacts?.web ?? null,
+      // Scores
+      scores: b.scores ?? {},
+    };
+  });
+
+  return json({ builds, total: count ?? builds.length, limit, offset });
+}
+
+async function handleUpdateBuildScores(buildId: string, body: any) {
+  const scores = body?.scores ?? body;
+  if (!scores || typeof scores !== "object") {
+    return json({ error: "scores object required" }, 400);
+  }
+  // Validate score values (1-5)
+  const validKeys = ["design", "functionality", "polish"];
+  const cleanScores: Record<string, number> = {};
+  for (const key of validKeys) {
+    if (key in scores) {
+      const val = Number(scores[key]);
+      if (!Number.isFinite(val) || val < 1 || val > 5) {
+        return json({ error: `${key} must be 1-5` }, 400);
+      }
+      cleanScores[key] = val;
+    }
+  }
+  const { data, error } = await admin
+    .from("builds")
+    .update({ scores: cleanScores })
+    .eq("id", buildId)
+    .select("id, scores")
+    .single();
+  if (error) return json({ error: error.message }, 500);
+  return json({ build: data });
 }

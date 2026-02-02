@@ -154,6 +154,9 @@ async function handleGetBuild(buildId: string) {
     error_code: data.error_code ?? null,
     error_message: data.error_message ?? null,
     retry_of_build_id: data.retry_of_build_id ?? null,
+    usage_summary: data.usage_summary ?? null,
+    langfuse_trace_id: data.langfuse_trace_id ?? null,
+    scores: data.scores ?? null,
   });
 }
 
@@ -170,6 +173,10 @@ async function handlePatchBuild(buildId: string, body: any) {
   if (body.job_id !== undefined) updates.job_id = body.job_id;
   if (body.agent_version !== undefined) updates.agent_version = body.agent_version;
   if (body.metadata !== undefined) updates.metadata = body.metadata;
+  // Usage tracking fields
+  if (body.usage_summary !== undefined) updates.usage_summary = body.usage_summary;
+  if (body.langfuse_trace_id !== undefined) updates.langfuse_trace_id = body.langfuse_trace_id;
+  if (body.scores !== undefined) updates.scores = body.scores;
 
   const rawErrorCode = body.error_code ?? body.errorCode;
   const parsedCode = parseBuildErrorCode(rawErrorCode);

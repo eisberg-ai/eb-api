@@ -63,15 +63,15 @@ Requires `SUPABASE_ANON_KEY` (and `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`). 
 
 ### userland setup (remote project)
 
-Use the helper to deploy migrations/functions and set secrets for a separate
-userland project:
+To deploy migrations/functions and set secrets for a separate userland project,
+use the setup script in eb-userland:
 
 ```bash
-BACKEND_BASE_PROJECT_REF=... ./cli/setup-userland.sh
+cd ../eb-userland
+BACKEND_BASE_PROJECT_REF=... task setup:remote
 ```
 
-`BACKEND_BASE_PROJECT_REF` (or `BACKEND_BASE_PROJECT_ID`) can be in your shell or `.env.prod`
-(loaded by the script).
+`BACKEND_BASE_PROJECT_REF` (or `BACKEND_BASE_PROJECT_ID`) can be in your shell or `.env.prod`.
 
 ## legacy node tests
 

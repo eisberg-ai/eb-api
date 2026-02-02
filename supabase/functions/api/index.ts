@@ -18,6 +18,7 @@ import { handleInvites } from "./routes/invites.ts";
 import { handleGallery } from "./routes/gallery.ts";
 import { handleVms } from "./routes/vms.ts";
 import { handleRuntime } from "./routes/runtime.ts";
+import { handleBackend } from "./routes/backend.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -101,6 +102,9 @@ export const handler = async (req: Request) => {
 
     const projectHandled = maybeWithCors(await handleProjects(req, segments, url, body));
     if (projectHandled) return projectHandled;
+
+    const backendHandled = maybeWithCors(await handleBackend(req, segments, url, body));
+    if (backendHandled) return backendHandled;
 
     const buildHandled = maybeWithCors(await handleBuilds(req, segments, url, body));
     if (buildHandled) return buildHandled;

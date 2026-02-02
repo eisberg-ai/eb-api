@@ -212,8 +212,12 @@ async function handlePostProjectService(req: Request, projectId: string, body: a
   const user = auth.user;
   const isService = auth.service;
   if (!isService) return json({ error: "unauthorized" }, 401);
-  const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
+  const { data: project } = await admin.from("projects").select("owner_user_id, backend_enabled").eq("id", projectId).single();
   if (!project) return json({ error: "not found" }, 404);
+  // Require backend to be enabled before services can be added
+  if (!project.backend_enabled) {
+    return json({ error: "backend_required", message: "Enable backend before adding services" }, 400);
+  }
   const stub = body?.serviceStub ?? body?.service_stub ?? body?.stub;
   if (!stub || typeof stub !== "string") return json({ error: "serviceStub required" }, 400);
   if (!ALLOWED_SERVICE_STUBS.has(stub)) return json({ error: "unknown service stub" }, 400);
