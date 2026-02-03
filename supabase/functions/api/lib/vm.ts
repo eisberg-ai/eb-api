@@ -32,6 +32,9 @@ const wakePath = Deno.env.get("CLOUD_RUN_WAKE_PATH") ?? "/wake";
 const requestTimeoutMs = Number(Deno.env.get("CLOUD_RUN_REQUEST_TIMEOUT_MS") ?? "5000");
 const heartbeatTtlSec = Number(Deno.env.get("VM_HEARTBEAT_TTL_SEC") ?? "90");
 const leaseSec = Number(Deno.env.get("VM_LEASE_SEC") ?? "900");
+const claimMaxAttempts = Number(Deno.env.get("VM_CLAIM_MAX_ATTEMPTS") ?? "3");
+const wakeMaxAttempts = Number(Deno.env.get("VM_WAKE_MAX_ATTEMPTS") ?? "3");
+const retryDelayMs = Number(Deno.env.get("VM_RETRY_DELAY_MS") ?? "500");
 
 function buildWakeUrl(baseUrl: string) {
   const trimmed = rewriteUrlForDocker(baseUrl.replace(/\/+$/g, ""));
@@ -52,6 +55,9 @@ async function loadAssignedVm(projectId: string) {
 
 async function pruneStaleVms(cutoffIso: string) {
   const now = new Date().toISOString();
+  // Prune VMs with:
+  // - stale heartbeat (null or older than cutoff)
+  // - expired lease (lease_expires_at in the past)
   const { data, error } = await admin
     .from("vms")
     .update({
@@ -65,7 +71,7 @@ async function pruneStaleVms(cutoffIso: string) {
       updated_at: now,
     })
     .in("status", ["idle", "busy", "starting"])
-    .or(`last_heartbeat_at.is.null,last_heartbeat_at.lt.${cutoffIso}`)
+    .or(`last_heartbeat_at.is.null,last_heartbeat_at.lt.${cutoffIso},lease_expires_at.lt.${now}`)
     .select("id, instance_id");
   if (error) {
     console.error("[vm] prune stale failed", { error: error.message });
@@ -144,22 +150,40 @@ export async function startVm(args: { projectId: string; mode: VmMode; buildId?:
   if (assigned && assigned.status !== "idle") {
     throw new Error("project already has active vm");
   }
+
+  // Claim with retry logic - another request may claim the VM before us
   let vm: VmRow | null = null;
-  if (assigned && assigned.status === "idle") {
-    vm = await claimVm(assigned.id, args);
-  }
-  if (!vm) {
+  for (let attempt = 1; attempt <= claimMaxAttempts; attempt++) {
+    // Try previously assigned VM first
+    if (assigned && assigned.status === "idle" && !vm) {
+      vm = await claimVm(assigned.id, args);
+      if (vm) break;
+    }
+    // Find and claim an idle VM
     const idle = await findIdleVm(cutoff);
-    if (!idle) throw new Error("no idle vms available");
+    if (!idle) {
+      if (attempt < claimMaxAttempts) {
+        console.info("[vm] no idle vms, retrying", { attempt, maxAttempts: claimMaxAttempts });
+        await new Promise((r) => setTimeout(r, retryDelayMs));
+        continue;
+      }
+      throw new Error("no idle vms available");
+    }
     console.info("[vm] idle candidate", {
       id: idle.id,
       instance_id: idle.instance_id,
       base_url: idle.base_url,
       last_heartbeat_at: idle.last_heartbeat_at,
+      attempt,
     });
     vm = await claimVm(idle.id, args);
+    if (vm) break;
+    if (attempt < claimMaxAttempts) {
+      console.info("[vm] claim failed (race), retrying", { vmId: idle.id, attempt });
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+    }
   }
-  if (!vm) throw new Error("failed to claim vm");
+  if (!vm) throw new Error("failed to claim vm after retries");
   if (!vm.base_url) {
     await releaseVm(vm.id, "missing_base_url");
     throw new Error("assigned vm missing base_url");
@@ -171,34 +195,51 @@ export async function startVm(args: { projectId: string; mode: VmMode; buildId?:
     project_id: vm.project_id,
     desired_build_id: vm.desired_build_id,
   });
+  // Skip wake for testing VM lifecycle (set VM_SKIP_WAKE=1)
+  const skipWake = Deno.env.get("VM_SKIP_WAKE") === "1";
+  if (skipWake) {
+    console.info("[vm] skipping wake (VM_SKIP_WAKE=1)", { vmId: vm.id });
+    return { vm: vm as VmRow, wakeOk: true };
+  }
+
+  // Wake with retry logic
   const wakeUrl = buildWakeUrl(vm.base_url);
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
   let wakeOk = false;
   let wakeError: string | null = null;
-  try {
-    const resp = await fetch(wakeUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project_id: args.projectId,
-        mode: args.mode,
-        build_id: args.buildId ?? null,
-        agent_type: args.agentType ?? null,
-      }),
-      signal: controller.signal,
-    });
-    wakeOk = resp.ok;
-    if (!resp.ok) {
+
+  for (let attempt = 1; attempt <= wakeMaxAttempts; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+    try {
+      const resp = await fetch(wakeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          project_id: args.projectId,
+          mode: args.mode,
+          build_id: args.buildId ?? null,
+          agent_type: args.agentType ?? null,
+        }),
+        signal: controller.signal,
+      });
+      wakeOk = resp.ok;
+      if (resp.ok) {
+        break;
+      }
       wakeError = `vm_wake_failed:${resp.status}`;
-      console.error("[vm] wake failed", { projectId: args.projectId, status: resp.status });
+      console.warn("[vm] wake failed", { projectId: args.projectId, status: resp.status, attempt });
+    } catch (err) {
+      wakeError = `vm_wake_failed:${(err as Error).message || "unknown"}`;
+      console.warn("[vm] wake error", { projectId: args.projectId, error: err, attempt });
+    } finally {
+      clearTimeout(timeoutId);
     }
-  } catch (err) {
-    wakeError = `vm_wake_failed:${(err as Error).message || "unknown"}`;
-    console.error("[vm] wake error", { projectId: args.projectId, error: err });
-  } finally {
-    clearTimeout(timeoutId);
+    if (attempt < wakeMaxAttempts) {
+      console.info("[vm] retrying wake", { attempt, maxAttempts: wakeMaxAttempts });
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+    }
   }
+
   if (!wakeOk) {
     await releaseVm(vm.id, wakeError ?? "vm_wake_failed");
     throw new Error(wakeError ?? "vm_wake_failed");

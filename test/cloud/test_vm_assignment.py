@@ -32,7 +32,7 @@ def test_vm_acquire_and_release() -> None:
 
     api_url = resolve_api_url(supabase_url, env)
     access_token = ensure_access_token(service_key, supabase_url)
-    project_id = create_project(api_url, access_token, service_key)
+    project_id = create_project(api_url, access_token)
 
     # Acquire VM
     acquire_resp = requests.post(

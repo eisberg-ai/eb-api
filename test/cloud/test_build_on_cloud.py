@@ -35,7 +35,7 @@ def test_simple_build_on_cloud() -> None:
     access_token = ensure_access_token(service_key, supabase_url)
 
     # Create project
-    project_id = create_project(api_url, access_token, service_key, name="Cloud Test App")
+    project_id = create_project(api_url, access_token, name="Cloud Test App")
 
     # Send a simple prompt
     chat_resp = requests.post(
@@ -44,6 +44,7 @@ def test_simple_build_on_cloud() -> None:
         json={
             "project_id": project_id,
             "message": "Create a simple hello world app with a button that says 'Click me'",
+            "model": "claude-sonnet-4-5",
         },
         timeout=30,
     )
@@ -93,7 +94,7 @@ def test_build_with_services() -> None:
     access_token = ensure_access_token(service_key, supabase_url)
 
     # Create project
-    project_id = create_project(api_url, access_token, service_key, name="Service Test App")
+    project_id = create_project(api_url, access_token, name="Service Test App")
 
     # Enable a service
     enable_resp = requests.post(
@@ -113,6 +114,7 @@ def test_build_with_services() -> None:
         json={
             "project_id": project_id,
             "message": "Create an AI chat app that uses OpenAI to respond to messages",
+            "model": "claude-sonnet-4-5",
             "attachments": {"services": [{"stub": "openai-gpt-4o-mini"}]},
         },
         timeout=30,

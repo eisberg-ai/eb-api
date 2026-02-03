@@ -325,6 +325,15 @@ async function handlePromoCodes(url: URL) {
   }
 }
 
+async function handleCluster(url: URL) {
+  const { limit, offset } = parsePagination(url);
+  try {
+    return json(await getClusterData(limit, offset));
+  } catch (err: any) {
+    return json({ error: err.message }, 500);
+  }
+}
+
 async function handleCreatePromoCode(user: any, body: any) {
   const rawAmount = body?.amount ?? body?.credits ?? body?.value ?? body?.usd ?? body?.dollars ?? null;
   const credits = Number(rawAmount);
@@ -496,6 +505,7 @@ export async function handleAdmin(req: Request, segments: string[], url: URL, bo
   if (req.method === "POST" && segments[1] === "invites") return handleCreateInvite(gate.user, body);
   if (req.method === "GET" && segments[1] === "promo-codes") return handlePromoCodes(url);
   if (req.method === "POST" && segments[1] === "promo-codes") return handleCreatePromoCode(gate.user, body);
+  if (req.method === "GET" && segments[1] === "cluster") return handleCluster(url);
   if (req.method === "POST" && segments[1] === "users" && segments[3] === "approval") {
     return handleUserApproval(gate.user, segments[2], body);
   }

@@ -1,6 +1,7 @@
 import { admin } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { json } from "../lib/response.ts";
+import { startVm } from "../lib/vm.ts";
 
 async function handleGetVm(req: Request, projectId: string) {
   const { user, service } = await getUserOrService(req, { allowServiceKey: true });
@@ -34,10 +35,23 @@ async function handlePostVmHeartbeat(req: Request, projectId: string, body: any)
 
 async function handleRegisterVm(req: Request, body: any) {
   const { service } = await getUserOrService(req, { allowServiceKey: true });
+  console.info("[vms/register] received", { body, hasService: !!service });
   if (!service) return json({ error: "unauthorized" }, 401);
   const instanceId = body?.instance_id || body?.instanceId;
   const baseUrl = body?.base_url || body?.baseUrl;
+  console.info("[vms/register] parsed", { instanceId, baseUrl });
   if (!instanceId || !baseUrl) return json({ error: "missing_instance_id_or_base_url" }, 400);
+
+  // Try to verify the worker is reachable (non-blocking, just for debugging)
+  try {
+    const healthUrl = `${baseUrl}/health`;
+    console.info("[vms/register] checking health", { healthUrl });
+    const healthResp = await fetch(healthUrl, { method: "GET", signal: AbortSignal.timeout(3000) });
+    console.info("[vms/register] health check result", { status: healthResp.status, ok: healthResp.ok });
+  } catch (err) {
+    console.warn("[vms/register] health check failed (non-fatal)", { baseUrl, error: String(err) });
+  }
+
   const now = new Date().toISOString();
   const { data, error } = await admin
     .from("vms")
@@ -55,7 +69,11 @@ async function handleRegisterVm(req: Request, body: any) {
     )
     .select("*")
     .single();
-  if (error) return json({ error: error.message }, 500);
+  if (error) {
+    console.error("[vms/register] upsert failed", { error: error.message });
+    return json({ error: error.message }, 500);
+  }
+  console.info("[vms/register] success", { vmId: data?.id, instanceId });
   return json({ vm: data });
 }
 
@@ -63,6 +81,7 @@ async function handleVmHeartbeat(req: Request, body: any) {
   const { service } = await getUserOrService(req, { allowServiceKey: true });
   if (!service) return json({ error: "unauthorized" }, 401);
   const instanceId = body?.instance_id || body?.instanceId;
+  console.info("[vms/heartbeat]", { instanceId, status: body?.status, runtime_state: body?.runtime_state });
   if (!instanceId) return json({ error: "missing_instance_id" }, 400);
   const updates: Record<string, unknown> = {
     last_heartbeat_at: new Date().toISOString(),
@@ -133,9 +152,32 @@ async function handlePatchVm(req: Request, projectId: string, body: any) {
   return json({ ok: true });
 }
 
+/**
+ * Acquire a VM for a project. Used for testing VM lifecycle.
+ * POST /vm/acquire or /vms/acquire
+ * Body: { project_id: string }
+ */
+async function handleAcquireVm(req: Request, body: any) {
+  const { service } = await getUserOrService(req, { allowServiceKey: true });
+  if (!service) return json({ error: "unauthorized" }, 401);
+  const projectId = body?.project_id || body?.projectId;
+  if (!projectId) return json({ error: "missing_project_id" }, 400);
+  try {
+    const { vm } = await startVm({ projectId, mode: "building" });
+    return json({ vm });
+  } catch (err) {
+    const msg = (err as Error).message;
+    if (msg.includes("no idle vms")) {
+      return json({ error: "no idle vms available" }, 503);
+    }
+    return json({ error: msg }, 500);
+  }
+}
+
 export async function handleVms(req: Request, segments: string[], _url: URL, body: any) {
   const method = req.method.toUpperCase();
-  if (segments[0] !== "vms") return null;
+  // Support both /vm and /vms prefixes
+  if (segments[0] !== "vms" && segments[0] !== "vm") return null;
   if (method === "POST" && segments.length === 2 && segments[1] === "register") {
     return handleRegisterVm(req, body);
   }
@@ -144,6 +186,9 @@ export async function handleVms(req: Request, segments: string[], _url: URL, bod
   }
   if (method === "POST" && segments.length === 2 && segments[1] === "release") {
     return handleReleaseVm(req, body);
+  }
+  if (method === "POST" && segments.length === 2 && segments[1] === "acquire") {
+    return handleAcquireVm(req, body);
   }
   if (method === "GET" && segments.length === 2) {
     return handleGetVm(req, segments[1]);

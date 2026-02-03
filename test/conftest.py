@@ -21,7 +21,10 @@ def pytest_configure(config: pytest.Config) -> None:
     # Register markers
     config.addinivalue_line("markers", "unit: pure functions, no deps")
     config.addinivalue_line("markers", "local: needs task dev:local")
-    config.addinivalue_line("markers", "multi: needs multiple repos")
+    config.addinivalue_line(
+        "markers",
+        "multi: needs eb-worker docker-compose (cd eb-worker/deploy && docker compose -f docker-compose.test.yml up)"
+    )
     config.addinivalue_line("markers", "cloud: needs cloud infra")
     config.addinivalue_line("markers", "e2e: full platform + LLM")
 
