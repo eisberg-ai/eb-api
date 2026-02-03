@@ -153,7 +153,7 @@ def test_update_build_scores() -> None:
     )
     assert resp.status_code == 200, resp.text
     result = resp.json()
-    assert result.get("ok") is True, "score update should return ok=true"
+    assert result.get("build") is not None, "score update should return updated build"
 
     # Verify scores were saved by fetching the build again
     resp = requests.get(

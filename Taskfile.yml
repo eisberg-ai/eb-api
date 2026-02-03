@@ -25,6 +25,25 @@ tasks:
   deploy:
     desc: deploy API to production (Supabase)
     cmds:
+      - |
+        echo ""
+        echo "=== Pre-deploy checklist ==="
+        echo ""
+        read -p "Have you run e2e tests? (task test:e2e:prod) [y/N]: " confirm
+        if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+          echo ""
+          echo "Please run e2e tests first:"
+          echo "  task test:e2e:prod"
+          echo ""
+          echo "Or bypass with: task deploy:force"
+          exit 1
+        fi
+      - supabase secrets set --env-file .env.prod
+      - task: supabase:deploy
+
+  deploy:force:
+    desc: deploy API without e2e confirmation (use with caution)
+    cmds:
       - supabase secrets set --env-file .env.prod
       - task: supabase:deploy
 
@@ -91,14 +110,56 @@ tasks:
   ###
 
   test:
-    desc: run all tests (unit + integration)
+    desc: run unit + local tests (pre-commit)
     cmds:
-      - pytest test/ -v --ignore=test/e2e --ignore=test/cloud
+      - pytest test/unit/ test/local/ -v --env local
 
-  test:integration:
-    desc: run integration tests (requires local Supabase)
+  test:unit:
+    desc: run unit tests only (no services needed)
     cmds:
-      - pytest test/integration/ -v -m integration
+      - pytest test/unit/ -v
+
+  test:local:
+    desc: run local tests (requires task dev:local)
+    cmds:
+      - |
+        echo "Running local tests..."
+        echo "Prerequisites: task dev:local running in another terminal"
+        pytest test/local/ -v -m local --env local
+
+  test:local:auto:
+    desc: run local tests (auto-starts services)
+    cmds:
+      - |
+        set -e
+        echo "=== Starting Supabase ==="
+        supabase start || true
+
+        echo "=== Starting functions server in background ==="
+        supabase functions serve api --no-verify-jwt &
+        SERVE_PID=$!
+        sleep 3
+
+        echo "=== Running local tests ==="
+        pytest test/local/ -v -m local --env local || TEST_EXIT=$?
+
+        echo "=== Stopping functions server ==="
+        kill $SERVE_PID 2>/dev/null || true
+
+        exit ${TEST_EXIT:-0}
+
+  test:multi:
+    desc: run multi-repo tests (requires worker + userland running)
+    cmds:
+      - |
+        echo "Running multi-repo tests..."
+        echo "Prerequisites: eb-api, eb-worker, eb-userland all running"
+        pytest test/multi/ -v -m multi --env local
+
+  test:cloud:
+    desc: run cloud tests (requires GCP access)
+    cmds:
+      - pytest test/cloud/ -v -m cloud --env prod
 
   test:e2e:local:
     desc: run e2e tests against local environment
@@ -106,11 +167,16 @@ tasks:
       - |
         echo "Running e2e tests against local environment..."
         echo "Prerequisites: supabase running (task start), VMs registered"
-        pytest test/e2e/ -v -m e2e -s
+        pytest test/e2e/ -v -m e2e -s --env local
 
   test:e2e:prod:
     desc: run e2e tests against production
     cmds:
       - |
         echo "Running e2e tests against production..."
-        EB_API_ENV_FILE=.env.prod pytest test/e2e/ -v -m e2e -s
+        pytest test/e2e/ -v -m e2e -s --env prod
+
+  hooks:install:
+    desc: install git pre-commit hooks
+    cmds:
+      - ./scripts/install-hooks.sh
