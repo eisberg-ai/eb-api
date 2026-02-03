@@ -25,6 +25,7 @@ def build_urls(env: dict[str, str]) -> tuple[str, str]:
     return api_url, auth_url
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_invite_code_redeem_flow() -> None:
     env = resolve_env()
@@ -78,6 +79,7 @@ def test_invite_code_redeem_flow() -> None:
     assert redeem_again.json().get("error") == "invite_code_used"
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_promo_code_one_time_use() -> None:
     env = resolve_env()

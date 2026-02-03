@@ -12,16 +12,20 @@ echo "Installing git hooks for eb-api..."
 # Create pre-commit hook
 cat > "$HOOKS_DIR/pre-commit" << 'EOF'
 #!/bin/bash
-# Pre-commit hook: runs unit + local tests
+# Pre-commit hook: runs unit + local tests (auto-starts services)
 # Bypass with: git commit --no-verify
 
 set -e
 
 echo "=== Running pre-commit tests ==="
 
-# Run unit + local tests
-echo "Running unit + local tests..."
-task test
+# Run unit tests first (no services needed)
+echo "Running unit tests..."
+task test:unit
+
+# Run local tests with auto-start
+echo "Running local tests (auto-starting services)..."
+task test:local:auto
 
 echo "=== Pre-commit tests passed ==="
 EOF

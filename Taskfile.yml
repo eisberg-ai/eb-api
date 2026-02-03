@@ -117,7 +117,7 @@ tasks:
   test:unit:
     desc: run unit tests only (no services needed)
     cmds:
-      - pytest test/unit/ -v
+      - pytest test/unit/ -v || [ $? -eq 5 ]  # exit 5 = no tests collected, OK
 
   test:local:
     desc: run local tests (requires task dev:local)

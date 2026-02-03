@@ -42,6 +42,7 @@ def service_key(env: dict[str, str]) -> str:
     return key
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_non_admin_invite_sets_join_method(
     supabase_url: str, api_url: str, anon_key: str, service_key: str,
@@ -64,6 +65,7 @@ def test_non_admin_invite_sets_join_method(
     assert profile.get('joinCode') == invite['code']
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_promo_redemption_marks_join_method(
     supabase_url: str, api_url: str, anon_key: str, service_key: str,
@@ -86,6 +88,7 @@ def test_promo_redemption_marks_join_method(
     assert profile.get('joinCode') == promo['code']
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_waitlist_gate_enforces_approval_denial(
     supabase_url: str, api_url: str, anon_key: str, service_key: str,

@@ -24,6 +24,7 @@ def build_urls(env: dict[str, str]) -> str:
     return resolve_api_url(supabase_url, env)
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_leaderboard_list() -> None:
     """Test GET /admin/leaderboard returns builds list."""
@@ -51,6 +52,7 @@ def test_leaderboard_list() -> None:
     assert isinstance(data["total"], int), "'total' should be an integer"
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_leaderboard_filters() -> None:
     """Test GET /admin/leaderboard with filters."""
@@ -83,6 +85,7 @@ def test_leaderboard_filters() -> None:
     assert "builds" in data
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_leaderboard_pagination() -> None:
     """Test GET /admin/leaderboard pagination."""
@@ -118,6 +121,7 @@ def test_leaderboard_pagination() -> None:
         assert page1["builds"][0]["id"] != page2["builds"][0]["id"], "pagination should return different builds"
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_update_build_scores() -> None:
     """Test PATCH /admin/leaderboard/{buildId}/scores updates scores."""
@@ -170,6 +174,7 @@ def test_update_build_scores() -> None:
         assert updated_build.get("scores", {}).get("polish") == 3
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_update_build_scores_validation() -> None:
     """Test PATCH /admin/leaderboard/{buildId}/scores validates score values."""
@@ -214,6 +219,7 @@ def test_update_build_scores_validation() -> None:
     assert resp.status_code == 400, f"Expected 400 for negative score, got {resp.status_code}: {resp.text}"
 
 
+@pytest.mark.local
 @pytest.mark.integration
 def test_leaderboard_requires_admin() -> None:
     """Test that leaderboard endpoints require admin access."""
