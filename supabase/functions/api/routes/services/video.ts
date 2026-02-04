@@ -1,8 +1,8 @@
 import type { ServiceDefinition } from './text.ts';
 
 export const videoServices: ServiceDefinition[] = [
-  { stub: 'sora-2', name: 'Sora 2', description: 'Fast video generation model', provider: 'openai', model: 'sora-2' },
-  { stub: 'sora-2-pro', name: 'Sora 2 Pro', description: 'High-quality video generation', provider: 'openai', model: 'sora-2-pro' },
+  { stub: 'sora-2', name: 'Sora 2', description: 'Fast video generation model', provider: 'openai', model: 'sora-2', disabled: true },
+  { stub: 'sora-2-pro', name: 'Sora 2 Pro', description: 'High-quality video generation', provider: 'openai', model: 'sora-2-pro', disabled: true },
 ];
 
 export function getVideoServices(): ServiceDefinition[] {

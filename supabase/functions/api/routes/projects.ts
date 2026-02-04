@@ -573,6 +573,7 @@ async function buildProjectPayload(projectId: string, userId?: string) {
   return {
     id: project.id,
     name: project.name,
+    created_at: project.created_at ?? null,
     updated_at: project.updated_at ?? null,
     current_version_id: project.current_version_number,
     latest_build_id: project.latest_build_id,

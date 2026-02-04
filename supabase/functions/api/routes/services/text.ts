@@ -5,6 +5,7 @@ export interface ServiceDefinition {
   config?: Record<string, any>;
   provider?: string;
   model?: string;
+  disabled?: boolean;
 }
 
 interface TextServiceConfig {
@@ -18,8 +19,8 @@ export const textServices: ServiceDefinition[] = [
   { stub: 'claude-haiku-4-5', name: 'Haiku 4.5', description: 'Fast, affordable model from Anthropic', provider: 'anthropic', model: 'claude-3-5-haiku-20241022' },
   { stub: 'claude-opus-4-5', name: 'Opus 4.5', description: "Anthropic's best model for specialized reasoning tasks", provider: 'anthropic', model: 'claude-opus-4-5-20251101' },
   { stub: 'claude-sonnet-4-5', name: 'Sonnet 4.5', description: 'Best model from Anthropic', provider: 'anthropic', model: 'claude-sonnet-4-5-20250929' },
-  { stub: 'gpt-5.2', name: 'GPT-5.2', description: 'The best model from OpenAI', provider: 'openai', model: 'gpt-5.2-chat-latest' },
-  { stub: 'gemini-3-pro', name: 'Gemini 3 Pro', description: 'The best model from Google', provider: 'google', model: 'gemini-3-pro-preview' },
+  { stub: 'gpt-5.2', name: 'GPT-5.2', description: 'The best model from OpenAI', provider: 'openai', model: 'gpt-5.2-chat-latest', disabled: true },
+  { stub: 'gemini-3-pro', name: 'Gemini 3 Pro', description: 'The best model from Google', provider: 'google', model: 'gemini-3-pro-preview', disabled: true },
 ];
 
 function getProviderApiKey(provider: string): string | null {

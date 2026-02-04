@@ -81,7 +81,6 @@ async function handleGetGallery(url: URL) {
     .from("projects")
     .select("id, name, owner_user_id, updated_at, created_at, is_public, is_gallery, gallery_slug, gallery, latest_build_id, status")
     .eq("is_public", true)
-    .eq("is_gallery", true)
     .neq("status", "draft")
     .neq("status", "archived")
     .order("updated_at", { ascending: false })

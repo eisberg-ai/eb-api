@@ -47,7 +47,7 @@ async function handleGetServices(req: Request, projectId?: string) {
     Object.keys(grouped).forEach(type => {
       grouped[type] = grouped[type].map(service => ({
         ...service,
-        enabled: enabledStubs.get(service.stub) ?? false,
+        enabled: service.disabled ? false : (enabledStubs.get(service.stub) ?? false),
       }));
     });
   }
@@ -69,7 +69,7 @@ async function handleGetServiceType(req: Request, type: string, projectId?: stri
     );
     return json(services.map(service => ({
       ...service,
-      enabled: enabledStubs.get(service.stub) ?? false,
+      enabled: service.disabled ? false : (enabledStubs.get(service.stub) ?? false),
     })));
   }
   return json(services);
