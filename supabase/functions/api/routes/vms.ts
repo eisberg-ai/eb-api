@@ -1,11 +1,19 @@
 import { admin } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
+import { getProjectAccess } from "../lib/access.ts";
 import { json } from "../lib/response.ts";
 import { startVm } from "../lib/vm.ts";
 
 async function handleGetVm(req: Request, projectId: string) {
   const { user, service } = await getUserOrService(req, { allowServiceKey: true });
   if (!user && !service) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  }
   const { data, error } = await admin
     .from("vms")
     .select("*")

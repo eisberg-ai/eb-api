@@ -1,6 +1,7 @@
 import { admin } from "../lib/env.ts";
 import { json } from "../lib/response.ts";
 import { getUserOrService } from "../lib/auth.ts";
+import { getProjectAccess } from "../lib/access.ts";
 
 const DEFAULT_LIMIT = 24;
 const MAX_LIMIT = 100;
@@ -70,7 +71,9 @@ const normalizeGallery = (gallery: any) => {
   return gallery;
 };
 
-async function handleGetGallery(url: URL) {
+async function handleGetGallery(req: Request, url: URL) {
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
   const limit = clampLimit(url.searchParams.get("limit"));
   const offset = Math.max(0, Number(url.searchParams.get("offset") ?? "0") || 0);
   const search = (url.searchParams.get("search") ?? "").trim();
@@ -140,7 +143,9 @@ async function handleGetGallery(url: URL) {
   return json({ items: filteredItems });
 }
 
-async function handleGetGalleryItem(slugOrId: string) {
+async function handleGetGalleryItem(req: Request, slugOrId: string) {
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
   const baseQuery = () =>
     admin
       .from("projects")
@@ -199,6 +204,13 @@ async function buildGalleryDetailResponse(project: any) {
 }
 
 async function handleLookupGalleryCache(req: Request, projectId: string, body: any) {
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const access = await getProjectAccess(projectId, user.id);
+  if (!access.project) return json({ error: "not found" }, 404);
+  if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+    return json({ error: "forbidden" }, 403);
+  }
   const queryTextRaw = body?.query ?? body?.prompt ?? "";
   const queryText = typeof queryTextRaw === "string" ? queryTextRaw.trim() : "";
   if (!queryText) return json({ error: "query required" }, 400);
@@ -284,10 +296,10 @@ export async function handleGallery(req: Request, segments: string[], url: URL, 
   const method = req.method.toUpperCase();
   if (segments[0] !== "gallery") return null;
   if (method === "GET" && segments.length === 1) {
-    return handleGetGallery(url);
+    return handleGetGallery(req, url);
   }
   if (method === "GET" && segments.length === 2) {
-    return handleGetGalleryItem(segments[1]);
+    return handleGetGalleryItem(req, segments[1]);
   }
   if (method === "POST" && segments.length === 4 && segments[2] === "cache" && segments[3] === "lookup") {
     return handleLookupGalleryCache(req, segments[1], body);

@@ -8,6 +8,7 @@ import { normalizeErrorMessage } from "../lib/buildFailure.ts";
 import { startVm } from "../lib/vm.ts";
 import { upsertSystemMessage } from "../lib/messages.ts";
 import { generateVmAcquiredMessage } from "../lib/vmMessages.ts";
+import { getProjectAccess } from "../lib/access.ts";
 
 type BuildStatus = "pending" | "queued" | "running" | "succeeded" | "failed";
 const MAX_RETRIES = 3;
@@ -135,9 +136,16 @@ async function handlePostBuild(body: any) {
   });
 }
 
-async function handleGetBuild(buildId: string) {
+async function handleGetBuild(buildId: string, userId?: string) {
   const { data, error } = await admin.from("builds").select("*").eq("id", buildId).single();
   if (error || !data) return json({ error: "Build not found" }, 404);
+  if (userId) {
+    const access = await getProjectAccess(data.project_id, userId);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  }
   return json({
     id: data.id,
     project_id: data.project_id,
@@ -279,13 +287,9 @@ async function handleDeleteStagedBuild(req: Request, buildId: string) {
   if (build.status !== "pending" || !build.depends_on_build_id) {
     return json({ error: "can_only_delete_staged", message: "Can only delete staged builds" }, 400);
   }
-  // verify ownership
-  const { data: project } = await admin
-    .from("projects")
-    .select("owner_user_id")
-    .eq("id", build.project_id)
-    .single();
-  if (!project || project.owner_user_id !== user.id) {
+  const access = await getProjectAccess(build.project_id, user.id);
+  if (!access.project) return json({ error: "not found" }, 404);
+  if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
     return json({ error: "forbidden" }, 403);
   }
   // repair chain: any build depending on this one should now depend on this build's dependency
@@ -330,15 +334,11 @@ async function handlePatchStagedBuild(req: Request, buildId: string, body: any) 
   if (build.status !== "pending" || !build.depends_on_build_id) {
     return json({ error: "staged_locked", message: "Staged build is already processing" }, 409);
   }
-  const { data: project } = await admin
-    .from("projects")
-    .select("owner_user_id")
-    .eq("id", build.project_id)
-    .single();
-  if (!project) return json({ error: "not found" }, 404);
+  const access = await getProjectAccess(build.project_id, user.id);
+  if (!access.project) return json({ error: "not found" }, 404);
   const metadata = (build.metadata as Record<string, any>) ?? {};
   const messageId = metadata.message_id ?? null;
-  if (project.owner_user_id !== user.id) {
+  if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
     return json({ error: "forbidden" }, 403);
   }
   const nextAttachments = hasAttachments ? (body.attachments ?? null) : (metadata.attachments ?? null);
@@ -393,7 +393,7 @@ async function handlePatchStagedBuild(req: Request, buildId: string, body: any) 
   });
 }
 
-async function handleGetBuildByJobId(jobId: string) {
+async function handleGetBuildByJobId(jobId: string, userId?: string) {
   const { data, error } = await admin
     .from("builds")
     .select("*")
@@ -402,6 +402,13 @@ async function handleGetBuildByJobId(jobId: string) {
     .limit(1)
     .maybeSingle();
   if (error || !data) return json({ error: "Build not found" }, 404);
+  if (userId) {
+    const access = await getProjectAccess(data.project_id, userId);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  }
   return json({
     id: data.id,
     project_id: data.project_id,
@@ -427,6 +434,11 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
   // get build
   const { data: build, error: buildErr } = await admin.from("builds").select("*").eq("id", buildId).single();
   if (buildErr || !build) return json({ error: "Build not found" }, 404);
+  const access = await getProjectAccess(build.project_id, user.id);
+  if (!access.project) return json({ error: "not found" }, 404);
+  if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+    return json({ error: "forbidden" }, 403);
+  }
   // verify build is failed
   if (build.status !== "failed") {
     return json({ error: "can_only_retry_failed", message: "Can only retry failed builds" }, 400);
@@ -622,17 +634,29 @@ export async function handleBuilds(req: Request, segments: string[], url: URL, b
   const method = req.method.toUpperCase();
   // POST /builds
   if (method === "POST" && segments[0] === "builds" && segments.length === 1) {
+    const { service } = await getUserOrService(req, { allowServiceKey: true });
+    if (!service) return json({ error: "unauthorized" }, 401);
     return handlePostBuild(body);
   }
   // GET /builds?jobId=xxx
   if (method === "GET" && segments[0] === "builds" && segments.length === 1) {
+    const auth = await getUserOrService(req, { allowServiceKey: true });
+    if (!auth.user && !auth.service) return json({ error: "unauthorized" }, 401);
     const jobId = url.searchParams.get("jobId");
-    if (jobId) return handleGetBuildByJobId(jobId);
+    if (jobId) {
+      return auth.service
+        ? handleGetBuildByJobId(jobId)
+        : handleGetBuildByJobId(jobId, auth.user!.id);
+    }
     return json({ error: "jobId query param required" }, 400);
   }
   // GET /builds/{id}
   if (method === "GET" && segments[0] === "builds" && segments.length === 2) {
-    return handleGetBuild(segments[1]);
+    const auth = await getUserOrService(req, { allowServiceKey: true });
+    if (!auth.user && !auth.service) return json({ error: "unauthorized" }, 401);
+    return auth.service
+      ? handleGetBuild(segments[1])
+      : handleGetBuild(segments[1], auth.user!.id);
   }
   // POST /builds/{id}/retry
   if (method === "POST" && segments[0] === "builds" && segments[2] === "retry") {
@@ -648,10 +672,14 @@ export async function handleBuilds(req: Request, segments: string[], url: URL, b
   }
   // PATCH /builds/{id}/tasks
   if (method === "PATCH" && segments[0] === "builds" && segments[2] === "tasks") {
+    const { service } = await getUserOrService(req, { allowServiceKey: true });
+    if (!service) return json({ error: "unauthorized" }, 401);
     return handlePatchBuildTasks(segments[1], body);
   }
   // PATCH /builds/{id}
   if (method === "PATCH" && segments[0] === "builds" && segments.length === 2) {
+    const { service } = await getUserOrService(req, { allowServiceKey: true });
+    if (!service) return json({ error: "unauthorized" }, 401);
     return handlePatchBuild(segments[1], body);
   }
   // POST /worker/version
@@ -660,6 +688,8 @@ export async function handleBuilds(req: Request, segments: string[], url: URL, b
   }
   // POST /build_steps
   if (method === "POST" && segments[0] === "build_steps") {
+    const { service } = await getUserOrService(req, { allowServiceKey: true });
+    if (!service) return json({ error: "unauthorized" }, 401);
     return handlePostBuildSteps(body);
   }
   return null;

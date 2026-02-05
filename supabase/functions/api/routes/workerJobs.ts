@@ -1,6 +1,7 @@
 import { json } from "../lib/response.ts";
 import { admin, defaultAgentVersion, getApiBaseUrl } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
+import { getProjectAccess } from "../lib/access.ts";
 import { nextJob, queueJob } from "./job.ts";
 import { setProjectStatus } from "../lib/project.ts";
 
@@ -24,6 +25,11 @@ async function handlePostWorkerJobs(req: Request, body: any) {
   const { user } = await getUserOrService(req);
   if (!user) return json({ error: "unauthorized" }, 401);
   const projectId = (body.project_id ?? body.projectId ?? "project-alpha").toString();
+  const access = await getProjectAccess(projectId, user.id);
+  if (!access.project) return json({ error: "not found" }, 404);
+  if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+    return json({ error: "forbidden" }, 403);
+  }
   const buildId = body.build_id ?? body.buildId ?? `build-${Date.now()}`;
   const payloadInput = body.payload ?? null;
   const payloadMessageRaw =
@@ -263,6 +269,8 @@ export async function handleWorkerJobs(req: Request, segments: string[], url: UR
   }
   // GET /worker/jobs
   if (method === "GET" && segments.length === 2) {
+    const { service } = await getUserOrService(req, { allowServiceKey: true });
+    if (!service) return json({ error: "unauthorized" }, 401);
     return handleGetWorkerJobs(url);
   }
   // GET /worker/jobs/{id}

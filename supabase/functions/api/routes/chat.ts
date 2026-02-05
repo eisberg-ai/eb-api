@@ -1,6 +1,7 @@
 import { json } from "../lib/response.ts";
 import { admin, defaultAgentVersion } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
+import { getProjectAccess } from "../lib/access.ts";
 import { ensureProject, isProModel, setProjectStatus, validateModelStub } from "../lib/project.ts";
 import { callLLM } from "../lib/llm.ts";
 import { startVm } from "../lib/vm.ts";
@@ -71,7 +72,13 @@ async function handlePostChat(req: Request, body: any) {
   const messageId = (body.message_id ?? crypto.randomUUID()).toString();
   const buildId = `build-${Date.now()}`;
   const messageModel = model;
-  await ensureProject(projectId, user.id);
+  const access = await getProjectAccess(projectId, user.id);
+  if (access.project && !access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+    return json({ error: "forbidden" }, 403);
+  }
+  if (!access.project) {
+    await ensureProject(projectId, user.id);
+  }
   const { data: projectRow, error: projectErr } = await admin
     .from("projects")
     .select("current_version_number, workspace_id")

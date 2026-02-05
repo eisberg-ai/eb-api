@@ -12,6 +12,7 @@ import pytest
 import requests
 
 from test.utils import (
+    auth_headers,
     ensure_access_token,
     ensure_credit_balance,
     resolve_api_url,
@@ -19,11 +20,15 @@ from test.utils import (
 )
 
 
-def poll_build(api_url: str, build_id: str, timeout_s: int = 900) -> dict:
+def poll_build(api_url: str, build_id: str, token: str, timeout_s: int = 900) -> dict:
     deadline = time.time() + timeout_s
     last_payload: dict | None = None
     while time.time() < deadline:
-        resp = requests.get(f"{api_url}/builds/{build_id}", timeout=20)
+        resp = requests.get(
+            f"{api_url}/builds/{build_id}",
+            headers=auth_headers(token),
+            timeout=20,
+        )
         if resp.status_code == 200:
             last_payload = resp.json()
             status = last_payload.get("status")
@@ -81,16 +86,22 @@ def test_chat_builds_and_previews() -> None:
     assert build_id, "chat response missing build id"
     print(f"[build] created {build_id}")
 
-    build_status = poll_build(api_url, build_id)
+    build_status = poll_build(api_url, build_id, access_token)
     print(f"[build] final {build_status.get('status')}")
     assert build_status.get("status") == "succeeded", build_status
-    preview_url = (build_status.get("artifacts") or {}).get("web")
-    assert preview_url, f"missing preview url in build artifacts: {build_status}"
-    assert "localhost" not in preview_url, f"preview url is not public: {preview_url}"
-
-    preview_resp = requests.get(preview_url, timeout=20, allow_redirects=True)
+    preview_url = f"{api_url}/preview/{build_id}/"
+    preview_resp = requests.get(
+        preview_url,
+        headers=auth_headers(access_token),
+        timeout=20,
+        allow_redirects=True,
+    )
     if preview_resp.status_code == 404:
-        preview_resp = requests.get(urljoin(preview_url.rstrip("/") + "/", "home"), timeout=20)
+        preview_resp = requests.get(
+            urljoin(preview_url.rstrip("/") + "/", "home"),
+            headers=auth_headers(access_token),
+            timeout=20,
+        )
     print(f"[preview] url={preview_resp.url} status={preview_resp.status_code}")
     assert preview_resp.status_code == 200, preview_resp.text
     assert "text/html" in preview_resp.headers.get("Content-Type", "")

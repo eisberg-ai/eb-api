@@ -49,17 +49,18 @@ def poll_build(api_url: str, build_id: str, token: str, timeout_s: int = BUILD_T
     raise TimeoutError(f"Build did not complete within {timeout_s}s: {json.dumps(last_payload)}")
 
 
-def verify_preview_accessible(preview_url: str) -> bool:
+def verify_preview_accessible(preview_url: str, token: str | None = None) -> bool:
     """Check if preview URL is accessible."""
     try:
-        resp = requests.get(preview_url, timeout=30, allow_redirects=True)
+        headers = auth_headers(token) if token else None
+        resp = requests.get(preview_url, headers=headers, timeout=30, allow_redirects=True)
         if resp.status_code == 200:
             content_type = resp.headers.get("Content-Type", "")
             return "text/html" in content_type
         # Try with /index.html suffix
         if not preview_url.rstrip("/").endswith(".html"):
             alt_url = urljoin(preview_url.rstrip("/") + "/", "index.html")
-            resp = requests.get(alt_url, timeout=30, allow_redirects=True)
+            resp = requests.get(alt_url, headers=headers, timeout=30, allow_redirects=True)
             return resp.status_code == 200 and "text/html" in resp.headers.get("Content-Type", "")
     except Exception as e:
         print(f"[preview] access error: {e}")
@@ -177,11 +178,12 @@ def test_full_app_lifecycle(
     artifacts = final_build.get("artifacts") or {}
     preview_url = artifacts.get("web")
     assert preview_url, f"Preview URL missing from build artifacts: {final_build}"
-    print(f"[e2e] Preview URL: {preview_url}")
+    api_preview_url = f"{api_url}/preview/{build_id}/"
+    print(f"[e2e] Preview URL: {api_preview_url}")
 
     # Preview should be accessible (project owner can access)
-    preview_accessible = verify_preview_accessible(preview_url)
-    assert preview_accessible, f"Preview not accessible: {preview_url}"
+    preview_accessible = verify_preview_accessible(api_preview_url, user_token)
+    assert preview_accessible, f"Preview not accessible: {api_preview_url}"
     print("[e2e] Preview is accessible")
 
     # Step 6: Get version number for preview path test
@@ -189,7 +191,12 @@ def test_full_app_lifecycle(
     if version_id:
         api_preview_url = f"{api_url}/preview/{project_id}/{version_id}/"
         print(f"[e2e] Testing API preview route: {api_preview_url}")
-        api_preview_resp = requests.get(api_preview_url, timeout=30, allow_redirects=True)
+        api_preview_resp = requests.get(
+            api_preview_url,
+            headers=auth_headers(user_token),
+            timeout=30,
+            allow_redirects=True,
+        )
         # May return 200 with shell or redirect
         assert api_preview_resp.status_code in (200, 302, 307), f"API preview failed: {api_preview_resp.status_code}"
 
@@ -213,12 +220,10 @@ def test_full_app_lifecycle(
     assert project_check.json().get("is_public") is True, "Project not marked as public"
     print("[e2e] Project is now public")
 
-    # Step 8: Verify public preview accessibility (no auth)
-    print("[e2e] Step 8: Verifying public preview accessibility...")
-    # Try accessing preview without auth
-    public_accessible = verify_preview_accessible(preview_url)
-    assert public_accessible, f"Public preview not accessible without auth: {preview_url}"
-    print("[e2e] Public preview is accessible")
+    # Step 8: Verify preview requires auth
+    print("[e2e] Step 8: Verifying preview requires auth...")
+    unauth_resp = requests.get(api_preview_url, timeout=30, allow_redirects=True)
+    assert unauth_resp.status_code in (401, 403), f"Preview should require auth: {unauth_resp.status_code}"
 
     print("[e2e] FULL LIFECYCLE TEST PASSED")
 
@@ -269,8 +274,7 @@ def test_simple_build_preview(
     final_build = poll_build(api_url, build_id, user_token, timeout_s=600)
     assert final_build.get("status") == "succeeded", f"Build failed: {final_build}"
 
-    preview_url = (final_build.get("artifacts") or {}).get("web")
-    assert preview_url, "Preview URL missing"
-    assert verify_preview_accessible(preview_url), f"Preview not accessible: {preview_url}"
+    preview_url = f"{api_url}/preview/{build_id}/"
+    assert verify_preview_accessible(preview_url, user_token), f"Preview not accessible: {preview_url}"
 
     print("[e2e-simple] SIMPLE BUILD TEST PASSED")

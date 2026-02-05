@@ -483,20 +483,17 @@ async function handlePostWebhook(req: Request, rawBody: string) {
   const signature = req.headers.get("stripe-signature") ?? "";
   let event: Stripe.Event;
   if (!stripeWebhookSecret) {
-    console.warn("stripe webhook secret not configured - skipping signature verification (local dev only)");
-    try {
-      event = JSON.parse(rawBody) as Stripe.Event;
-    } catch (err: any) {
-      console.error("failed to parse webhook body", err?.message ?? err);
-      return json({ error: "invalid_payload" }, 400);
-    }
-  } else {
-    try {
-      event = await stripe.webhooks.constructEventAsync(rawBody, signature, stripeWebhookSecret);
-    } catch (err: any) {
-      console.error("stripe webhook signature failed", err?.message ?? err);
-      return json({ error: "invalid_signature" }, 400);
-    }
+    console.error("stripe webhook secret missing");
+    return json({ error: "stripe_webhook_secret_missing" }, 500);
+  }
+  if (!signature) {
+    return json({ error: "missing_signature" }, 400);
+  }
+  try {
+    event = await stripe.webhooks.constructEventAsync(rawBody, signature, stripeWebhookSecret);
+  } catch (err: any) {
+    console.error("stripe webhook signature failed", err?.message ?? err);
+    return json({ error: "invalid_signature" }, 400);
   }
   try {
     if (event.type === "checkout.session.completed") {
@@ -820,6 +817,8 @@ export async function handleBilling(req: Request, segments: string[], url: URL, 
   }
   // GET /billing/packs
   if (method === "GET" && segments[1] === "packs") {
+    const { user } = await getUserOrService(req);
+    if (!user) return json({ error: "unauthorized" }, 401);
     return handleGetPacks();
   }
   // POST /billing/checkout-session
@@ -836,6 +835,8 @@ export async function handleBilling(req: Request, segments: string[], url: URL, 
   }
   // GET /billing/plans
   if (method === "GET" && segments[1] === "plans") {
+    const { user } = await getUserOrService(req);
+    if (!user) return json({ error: "unauthorized" }, 401);
     return json({ plans: Object.values(PLANS) });
   }
   // GET /billing/subscription
@@ -887,6 +888,8 @@ export async function handleBilling(req: Request, segments: string[], url: URL, 
   }
   // GET /billing/pricing
   if (method === "GET" && segments[1] === "pricing") {
+    const { user } = await getUserOrService(req);
+    if (!user) return json({ error: "unauthorized" }, 401);
     return json({ minBuildBalance: MIN_BUILD_BALANCE, payAsYouGo: true, llmPricing: parseLlmPricing() });
   }
   // POST /billing/llm-usage (per-call LLM token spend with markup)

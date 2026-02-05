@@ -45,6 +45,7 @@ export const handler = async (req: Request) => {
     console.log("[api] request", {
       method,
       path: url.pathname,
+      segments: JSON.stringify(segments),
       host: req.headers.get("host"),
       origin: req.headers.get("origin"),
       referer: req.headers.get("referer"),

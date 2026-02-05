@@ -34,7 +34,9 @@ function stripProviderKeys(config: any): any {
 }
 
 async function handleGetServices(req: Request, projectId?: string) {
-  const { user } = await getUserOrService(req);
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  if (!user && !auth.service) return json({ error: "unauthorized" }, 401);
   const grouped = getServicesRegistry();
   if (projectId && user) {
     const { data: enabledServices } = await admin
@@ -55,7 +57,9 @@ async function handleGetServices(req: Request, projectId?: string) {
 }
 
 async function handleGetServiceType(req: Request, type: string, projectId?: string) {
-  const { user } = await getUserOrService(req);
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  if (!user && !auth.service) return json({ error: "unauthorized" }, 401);
   const serviceHandler = serviceMap[type];
   if (!serviceHandler) return json({ error: "invalid service type" }, 400);
   const services = serviceHandler.getServices();
@@ -172,13 +176,15 @@ async function handleProxyService(req: Request, type: string, stub: string, proj
 }
 
 async function handleGetModels(req: Request) {
-  await getUserOrService(req);
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  if (!auth.user && !auth.service) return json({ error: "unauthorized" }, 401);
   const models = getModelsRegistry();
   return json({ models });
 }
 
 async function handleValidateServices(req: Request, body: any) {
-  await getUserOrService(req);
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  if (!auth.user && !auth.service) return json({ error: "unauthorized" }, 401);
   const services = body?.services;
   if (!Array.isArray(services)) {
     return json({ error: "services array required" }, 400);
@@ -234,4 +240,3 @@ export async function handleServices(req: Request, segments: string[], url: URL,
   }
   return null;
 }
-

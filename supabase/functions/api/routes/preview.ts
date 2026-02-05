@@ -1,6 +1,7 @@
 import { admin, awsClient, r2PreviewBucket, r2Endpoint, r2PreviewPublicBase } from "../lib/env.ts";
 import { rewriteHtmlForSubpath } from "../lib/response.ts";
 import { startVm } from "../lib/vm.ts";
+import { getProjectAccess } from "../lib/access.ts";
 
 const PREVIEW_CSP = [
   "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'",
@@ -11,6 +12,62 @@ const PREVIEW_CSP = [
   "connect-src * data: blob:",
   "frame-src * data: blob:",
 ].join("; ");
+
+const PREVIEW_TOKEN_COOKIE = "preview_access_token";
+
+function getCookieValue(header: string | null, name: string): string | null {
+  if (!header) return null;
+  const parts = header.split(";");
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const [key, ...rest] = trimmed.split("=");
+    if (key === name) return rest.join("=");
+  }
+  return null;
+}
+
+function getPreviewToken(req: Request, url: URL): string | null {
+  const authHeader = req.headers.get("Authorization") || "";
+  if (authHeader.startsWith("Bearer ")) {
+    return authHeader.replace("Bearer ", "").trim();
+  }
+  const queryToken = url.searchParams.get("access_token");
+  if (queryToken) return queryToken;
+  const cookieHeader = req.headers.get("cookie") || req.headers.get("Cookie");
+  return getCookieValue(cookieHeader, PREVIEW_TOKEN_COOKIE);
+}
+
+function attachPreviewCookie(headers: Record<string, string>, token: string | null) {
+  if (!token) return;
+  headers["Set-Cookie"] = `${PREVIEW_TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax`;
+}
+
+async function requirePreviewUser(req: Request, url: URL) {
+  const token = getPreviewToken(req, url);
+  if (!token) {
+    return {
+      user: null,
+      token: null,
+      response: new Response("unauthorized", {
+        status: 401,
+        headers: buildPreviewHeaders("text/plain"),
+      }),
+    };
+  }
+  const { data: { user } } = await admin.auth.getUser(token);
+  if (!user) {
+    return {
+      user: null,
+      token: null,
+      response: new Response("unauthorized", {
+        status: 401,
+        headers: buildPreviewHeaders("text/plain"),
+      }),
+    };
+  }
+  return { user, token, response: null };
+}
 
 function buildPreviewShell(previewSrc: string) {
   return `<!doctype html>
@@ -159,26 +216,38 @@ function parseBuildPreviewSegments(segments: string[]) {
 async function handleBuildPreview(req: Request, segments: string[], url: URL) {
   const parsed = parseBuildPreviewSegments(segments);
   if (!parsed) return null;
+  const auth = await requirePreviewUser(req, url);
+  if (auth.response) return auth.response;
   const { buildId, restSegments } = parsed;
   const restPath = restSegments.length === 0 ? "index.html" : restSegments.join("/");
   const isHtmlPath = restPath.toLowerCase().endsWith(".html");
   const { data: build, error } = await admin
     .from("builds")
-    .select("id, artifacts")
+    .select("id, artifacts, project_id")
     .eq("id", buildId)
     .maybeSingle();
   if (error || !build) {
-    return new Response("build not found", {
-      status: 404,
-      headers: buildPreviewHeaders("text/plain", false, { branch: "vm-not-found", restPath }),
-    });
+    const headers = buildPreviewHeaders("text/plain", false, { branch: "vm-not-found", restPath });
+    attachPreviewCookie(headers, auth.token);
+    return new Response("build not found", { status: 404, headers });
+  }
+  const access = await getProjectAccess(build.project_id, auth.user.id);
+  if (!access.project) {
+    const headers = buildPreviewHeaders("text/plain", false, { branch: "vm-not-found", restPath });
+    attachPreviewCookie(headers, auth.token);
+    return new Response("build not found", { status: 404, headers });
+  }
+  const allowed = access.isOwner || access.isWorkspaceMember || access.isAdmin || !!access.project.is_public;
+  if (!allowed) {
+    const headers = buildPreviewHeaders("text/plain", false, { branch: "vm-forbidden", restPath });
+    attachPreviewCookie(headers, auth.token);
+    return new Response("forbidden", { status: 403, headers });
   }
   const webUrl = (build.artifacts as any)?.web as string | undefined;
   if (!webUrl) {
-    return new Response("preview not available", {
-      status: 404,
-      headers: buildPreviewHeaders("text/plain", false, { branch: "vm-missing-preview", restPath }),
-    });
+    const headers = buildPreviewHeaders("text/plain", false, { branch: "vm-missing-preview", restPath });
+    attachPreviewCookie(headers, auth.token);
+    return new Response("preview not available", { status: 404, headers });
   }
   let upstream: URL;
   try {
@@ -186,50 +255,60 @@ async function handleBuildPreview(req: Request, segments: string[], url: URL) {
     const basePath = base.pathname.replace(/\/+$/, "") + "/";
     upstream = new URL(basePath + restPath, `${base.protocol}//${base.host}`);
   } catch (_e) {
-    return new Response("invalid preview url", {
-      status: 400,
-      headers: buildPreviewHeaders("text/plain", false, { branch: "vm-invalid-url", restPath }),
-    });
+    const headers = buildPreviewHeaders("text/plain", false, { branch: "vm-invalid-url", restPath });
+    attachPreviewCookie(headers, auth.token);
+    return new Response("invalid preview url", { status: 400, headers });
   }
   const upstreamResp = await fetch(upstream.toString(), { redirect: "follow" });
   const contentType = upstreamResp.headers.get("Content-Type") || "";
   if (!upstreamResp.ok) {
-    return new Response(`preview fetch failed (${upstreamResp.status})`, {
-      status: upstreamResp.status,
-      headers: buildPreviewHeaders("text/plain", false, {
-        branch: "vm-upstream-error",
-        restPath,
-        upstreamType: contentType || undefined,
-      }),
+    const headers = buildPreviewHeaders("text/plain", false, {
+      branch: "vm-upstream-error",
+      restPath,
+      upstreamType: contentType || undefined,
     });
+    attachPreviewCookie(headers, auth.token);
+    return new Response(`preview fetch failed (${upstreamResp.status})`, { status: upstreamResp.status, headers });
   }
   if (contentType.includes("text/html") || isHtmlPath) {
     const html = await upstreamResp.text();
     const baseHref = getRequestBaseHref(req, url);
     const rewritten = rewriteHtmlForSubpath(html, baseHref);
-    return new Response(rewritten, {
-      status: 200,
-      headers: buildPreviewHeaders("text/html; charset=utf-8", true, {
-        branch: "vm-html",
-        restPath,
-        upstreamType: contentType || undefined,
-      }),
-    });
-  }
-  const body = await upstreamResp.arrayBuffer();
-  return new Response(body, {
-    status: 200,
-    headers: buildPreviewHeaders(contentType || undefined, false, {
-      branch: "vm-binary",
+    const headers = buildPreviewHeaders("text/html; charset=utf-8", true, {
+      branch: "vm-html",
       restPath,
       upstreamType: contentType || undefined,
-    }),
+    });
+    attachPreviewCookie(headers, auth.token);
+    return new Response(rewritten, { status: 200, headers });
+  }
+  const body = await upstreamResp.arrayBuffer();
+  const headers = buildPreviewHeaders(contentType || undefined, false, {
+    branch: "vm-binary",
+    restPath,
+    upstreamType: contentType || undefined,
   });
+  attachPreviewCookie(headers, auth.token);
+  return new Response(body, { status: 200, headers });
 }
 
 async function handleGetPreview(req: Request, segments: string[], url: URL) {
   const projectId = segments[1];
   const version = segments[2];
+  const auth = await requirePreviewUser(req, url);
+  if (auth.response) return auth.response;
+  const access = await getProjectAccess(projectId, auth.user.id);
+  if (!access.project) {
+    const headers = buildPreviewHeaders("text/plain", false, { branch: "not-found", restPath: "index.html" });
+    attachPreviewCookie(headers, auth.token);
+    return new Response("project not found", { status: 404, headers });
+  }
+  const allowed = access.isOwner || access.isWorkspaceMember || access.isAdmin || !!access.project.is_public;
+  if (!allowed) {
+    const headers = buildPreviewHeaders("text/plain", false, { branch: "forbidden", restPath: "index.html" });
+    attachPreviewCookie(headers, auth.token);
+    return new Response("forbidden", { status: 403, headers });
+  }
   try {
     await startVm({ projectId, mode: "serving" });
   } catch (err) {
@@ -242,6 +321,10 @@ async function handleGetPreview(req: Request, segments: string[], url: URL) {
   const isIndexHtml = restPath === "index.html";
   const wantsRaw = url.searchParams.get("raw") === "1";
   const key = `${projectId}/${version}/${restPath}`.replace(/\/+/g, "/").replace(/^\//, "");
+  const withCookie = (headers: Record<string, string>) => {
+    attachPreviewCookie(headers, auth.token);
+    return headers;
+  };
   const baseHref = getRequestBaseHref(req, url);
   const previewRootBaseHref = getPreviewRootBaseHref(req, url, projectId, version);
   const candidates: string[] = [];
@@ -296,21 +379,21 @@ async function handleGetPreview(req: Request, segments: string[], url: URL) {
           const shell = buildPreviewShell(previewSrc);
           return new Response(shell, {
             status: 200,
-            headers: buildPreviewHeaders("text/html; charset=utf-8", true, {
+            headers: withCookie(buildPreviewHeaders("text/html; charset=utf-8", true, {
               branch: "fetch-html-shell",
               restPath,
               upstreamType: contentType || undefined,
-            }),
+            })),
           });
         }
         const rewritten = rewriteHtmlForSubpath(html, baseHref);
         return new Response(rewritten, {
           status: 200,
-          headers: buildPreviewHeaders("text/html; charset=utf-8", true, {
+          headers: withCookie(buildPreviewHeaders("text/html; charset=utf-8", true, {
             branch: "fetch-html",
             restPath,
             upstreamType: contentType || undefined,
-          }),
+          })),
         });
       }
       if (isJs) {
@@ -321,22 +404,22 @@ async function handleGetPreview(req: Request, segments: string[], url: URL) {
           .replaceAll("url(/assets/", `url(${previewRootBaseHref}assets/`);
         return new Response(rewritten, {
           status: 200,
-          headers: buildPreviewHeaders(contentType || "text/javascript", false, {
+          headers: withCookie(buildPreviewHeaders(contentType || "text/javascript", false, {
             branch: "fetch-js",
             restPath,
             upstreamType: contentType || undefined,
-          }),
+          })),
         });
       }
       const buf = new Uint8Array(await resp.arrayBuffer());
       const type = contentType || "application/octet-stream";
       return new Response(buf, {
         status: 200,
-        headers: buildPreviewHeaders(type, false, {
+        headers: withCookie(buildPreviewHeaders(type, false, {
           branch: "fetch-binary",
           restPath,
           upstreamType: contentType || undefined,
-        }),
+        })),
       });
     } catch (err) {
       errors.push(`${urlCandidate} => ${(err as Error).message}`);
@@ -379,21 +462,21 @@ async function handleGetPreview(req: Request, segments: string[], url: URL) {
               const shell = buildPreviewShell(previewSrc);
               return new Response(shell, {
                 status: 200,
-                headers: buildPreviewHeaders("text/html; charset=utf-8", true, {
+                headers: withCookie(buildPreviewHeaders("text/html; charset=utf-8", true, {
                   branch: "aws-html-shell",
                   restPath,
                   upstreamType: contentType || undefined,
-                }),
+                })),
               });
             }
             const rewritten = rewriteHtmlForSubpath(bodyText, baseHref);
             return new Response(rewritten, {
               status: 200,
-              headers: buildPreviewHeaders("text/html; charset=utf-8", true, {
+              headers: withCookie(buildPreviewHeaders("text/html; charset=utf-8", true, {
                 branch: "aws-html",
                 restPath,
                 upstreamType: contentType || undefined,
-              }),
+              })),
             });
           }
         }
@@ -403,20 +486,20 @@ async function handleGetPreview(req: Request, segments: string[], url: URL) {
             .replaceAll("\"/assets/", `"${previewRootBaseHref}assets/`)
             .replaceAll("'/assets/", `'${previewRootBaseHref}assets/`)
             .replaceAll("url(/assets/", `url(${previewRootBaseHref}assets/`);
-          const headers = buildPreviewHeaders(res.headers.get("Content-Type") || undefined, false, {
+          const headers = withCookie(buildPreviewHeaders(res.headers.get("Content-Type") || undefined, false, {
             branch: "aws-js",
             restPath,
             upstreamType: contentType || undefined,
-          });
+          }));
           return new Response(rewritten, { status: res.status, headers });
         }
         // binary content, read as arrayBuffer
         const body = await res.arrayBuffer();
-        const headers = buildPreviewHeaders(res.headers.get("Content-Type") || undefined, false, {
+        const headers = withCookie(buildPreviewHeaders(res.headers.get("Content-Type") || undefined, false, {
           branch: "aws-binary",
           restPath,
           upstreamType: contentType || undefined,
-        });
+        }));
         return new Response(body, { status: res.status, headers });
       }
       errors.push(`awsClient => ${res.status}`);
@@ -427,7 +510,7 @@ async function handleGetPreview(req: Request, segments: string[], url: URL) {
   console.error("preview fetch failed", { key, projectId: segments[1], version: segments[2], restPath, errors });
   return new Response(`Preview not found: ${key}\n\nTried:\n${errors.join('\n')}`, {
     status: 404,
-    headers: buildPreviewHeaders("text/plain", false, { branch: "not-found", restPath }),
+    headers: withCookie(buildPreviewHeaders("text/plain", false, { branch: "not-found", restPath })),
   });
 }
 

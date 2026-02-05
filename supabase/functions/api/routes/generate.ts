@@ -1,38 +1,89 @@
 import { json } from "../lib/response.ts";
+import { getUserOrService } from "../lib/auth.ts";
+
+const APP_NAMES_SYSTEM_PROMPT = `You are a world-class app naming expert. Generate exactly 5 unique, iconic app names for the given app idea.
+
+Your names should be:
+- BRANDABLE: Easy to say, spell, and remember
+- ICONIC: Could become household names like Spotify, Instagram, Notion, Figma
+- CREATIVE: Use techniques like:
+  - Invented words (Spotify, Hulu, Roku)
+  - Word combinations/portmanteaus (Instagram, Pinterest, Snapchat)
+  - Modified spellings (Lyft, Tumblr, Flickr)
+  - Short punchy words (Slack, Zoom, Stripe)
+  - Evocative single words (Notion, Craft, Bear)
+  - Playful sounds (TikTok, Bumble, Figma)
+
+Rules:
+- Each name should be 1-2 words max
+- No generic descriptive names like "Workout Tracker" or "Recipe App"
+- Make them feel like real startup names
+- Return ONLY the 5 names, one per line, nothing else`;
+
+async function callHaiku(systemPrompt: string, userPrompt: string, maxTokens = 100): Promise<string> {
+  const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
+  if (!apiKey) {
+    throw new Error("ANTHROPIC_API_KEY not configured");
+  }
+  const response = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-3-haiku-20240307",
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
+      temperature: 0.9,
+      max_tokens: maxTokens,
+    }),
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`anthropic api error: ${response.status} ${errorText}`);
+  }
+  const data = await response.json();
+  return data.content?.[0]?.text?.trim() || "";
+}
+
+async function handlePostGenerateAppNames(body: any) {
+  const { description } = body;
+  if (!description || typeof description !== "string" || !description.trim()) {
+    return json({ error: "description required" }, 400);
+  }
+  try {
+    const result = await callHaiku(APP_NAMES_SYSTEM_PROMPT, description.trim());
+    const names = result
+      .split("\n")
+      .map((line: string) => line.trim())
+      .filter((line: string) => line.length > 0 && line.length < 30)
+      .slice(0, 5);
+    if (names.length === 0) {
+      return json({ error: "failed to generate names" }, 500);
+    }
+    return json({ names });
+  } catch (error) {
+    console.error("generate app names error:", error);
+    return json({ error: "internal server error" }, 500);
+  }
+}
 
 async function handlePostGenerateTitle(body: any) {
   const { messages } = body;
   if (!messages || !Array.isArray(messages) || messages.length === 0) return json({ error: "messages array required" }, 400);
   const userMessages = messages.filter((m: any) => m.role === "user").map((m: any) => m.content || m.text).join(" ");
   if (!userMessages.trim()) return json({ error: "no user messages found" }, 400);
-  const apiKey = Deno.env.get("DEEPSEEK_API_KEY");
-  if (!apiKey) {
-    console.error("DEEPSEEK_API_KEY not configured");
-    return json({ error: "api key not configured" }, 500);
-  }
   try {
-    const response = await fetch("https://api.deepseek.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-      body: JSON.stringify({
-        model: "deepseek-chat",
-        messages: [
-          { role: "system", content: "generate a short 3-4 word title for this app idea. return only the title, nothing else. be concise and descriptive." },
-          { role: "user", content: userMessages },
-        ],
-        temperature: 0.7,
-        max_tokens: 20,
-      }),
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("deepseek api error:", errorText);
-      return json({ error: "failed to generate title" }, 500);
-    }
-    const data = await response.json();
-    const title = data.choices?.[0]?.message?.content?.trim() || "New Chat";
-    const words = title.split(/\s+/).slice(0, 4).join(" ");
-    return json({ title: words });
+    // Use Haiku for title generation too
+    const result = await callHaiku(APP_NAMES_SYSTEM_PROMPT, userMessages);
+    const names = result
+      .split("\n")
+      .map((line: string) => line.trim())
+      .filter((line: string) => line.length > 0 && line.length < 30);
+    const title = names[0] || "New App";
+    return json({ title });
   } catch (error) {
     console.error("generate title error:", error);
     return json({ error: "internal server error" }, 500);
@@ -84,12 +135,22 @@ async function handlePostGenerateWelcome(body: any) {
 
 export async function handleGenerate(req: Request, segments: string[], _url: URL, body: any) {
   const method = req.method.toUpperCase();
+  // POST /generate-app-names
+  if (method === "POST" && segments[0] === "generate-app-names") {
+    const { user } = await getUserOrService(req);
+    if (!user) return json({ error: "unauthorized" }, 401);
+    return handlePostGenerateAppNames(body);
+  }
   // POST /generate-title
   if (method === "POST" && segments[0] === "generate-title") {
+    const { user } = await getUserOrService(req);
+    if (!user) return json({ error: "unauthorized" }, 401);
     return handlePostGenerateTitle(body);
   }
   // POST /generate-welcome
   if (method === "POST" && segments[0] === "generate-welcome") {
+    const { user } = await getUserOrService(req);
+    if (!user) return json({ error: "unauthorized" }, 401);
     return handlePostGenerateWelcome(body);
   }
   return null;

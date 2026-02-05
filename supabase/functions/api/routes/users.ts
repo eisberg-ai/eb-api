@@ -129,6 +129,59 @@ async function handleUpdateProfile(req: Request, body: any) {
   return json({ ok: true });
 }
 
+/**
+ * Get onboarding status.
+ */
+async function handleGetOnboarding(req: Request) {
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const { data: profile } = await admin
+    .from("user_profiles")
+    .select("metadata")
+    .eq("user_id", user.id)
+    .single();
+  const onboarding = (profile?.metadata as any)?.onboarding ?? null;
+  return json({
+    completed: onboarding?.completed === true,
+    currentStep: onboarding?.currentStep ?? 0,
+    answers: onboarding?.answers ?? {},
+  });
+}
+
+/**
+ * Submit onboarding progress (called per page).
+ */
+async function handleSubmitOnboarding(req: Request, body: any) {
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const { completed, currentStep, ...answers } = body;
+  // fetch existing metadata
+  const { data: profile } = await admin
+    .from("user_profiles")
+    .select("metadata")
+    .eq("user_id", user.id)
+    .single();
+  const existingMetadata = (profile?.metadata as Record<string, unknown>) ?? {};
+  const updatedMetadata = {
+    ...existingMetadata,
+    onboarding: {
+      answers,
+      currentStep: currentStep ?? 0,
+      completed: completed === true,
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  const { error } = await admin
+    .from("user_profiles")
+    .upsert({
+      user_id: user.id,
+      metadata: updatedMetadata,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "user_id" });
+  if (error) return json({ error: error.message }, 500);
+  return json({ ok: true });
+}
+
 async function handleSetUserType(req: Request, userId: string, body: any) {
   const { user, service } = await getUserOrService(req, { allowServiceKey: true });
   if (!service) {
@@ -170,6 +223,14 @@ export async function handleUsers(req: Request, segments: string[], _url: URL, b
   // PATCH /users/profile
   if (method === "PATCH" && segments[1] === "profile") {
     return handleUpdateProfile(req, body);
+  }
+  // GET /users/onboarding
+  if (method === "GET" && segments[1] === "onboarding") {
+    return handleGetOnboarding(req);
+  }
+  // POST /users/onboarding
+  if (method === "POST" && segments[1] === "onboarding") {
+    return handleSubmitOnboarding(req, body);
   }
   // POST /users/{id}/type
   if (method === "POST" && segments.length === 3 && segments[2] === "type" && segments[1] !== "profile") {

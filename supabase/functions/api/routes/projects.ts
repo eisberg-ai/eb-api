@@ -1,6 +1,7 @@
 import { json } from "../lib/response.ts";
 import { admin, defaultAgentVersion, getApiBaseUrl } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
+import { getProjectAccess } from "../lib/access.ts";
 import { ensureProject, getCurrentWorkspaceId, DEFAULT_MODEL, isProModel, normalizeProjectStatus, validateModelStub } from "../lib/project.ts";
 import { callLLM } from "../lib/llm.ts";
 import { getServicesRegistry } from "../lib/registry.ts";
@@ -26,10 +27,22 @@ async function generateTitleFromPrompt(prompt: string): Promise<string | null> {
 }
 
 async function handleGetVersions(req: Request, segments: string[], url: URL) {
-  const { user } = await getUserOrService(req);
-  if (!user) return json({ error: "unauthorized" }, 401);
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  const isService = auth.service;
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
   const projectId = url.searchParams.get("projectId") || segments[2];
   if (!projectId) return json({ error: "projectId required" }, 400);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
+  }
   const { data: builds } = await admin
     .from("builds")
     .select("id, version_number, created_at, artifacts, is_promoted, status")
@@ -65,18 +78,15 @@ async function handleGetEnvVars(req: Request, projectId: string) {
   const user = auth.user;
   const isService = auth.service;
   if (!user && !isService) return json({ error: "unauthorized" }, 401);
-  const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
-  if (!project) return json({ error: "not found" }, 404);
-  if (!isService) {
-    const { data: memberRows } = await admin
-      .from("project_members")
-      .select("user_id")
-      .eq("project_id", projectId)
-      .eq("user_id", user!.id)
-      .limit(1);
-    const isOwner = project.owner_user_id === user!.id;
-    const isMember = (memberRows ?? []).length > 0;
-    if (!isOwner && !isMember) return json({ error: "forbidden" }, 403);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
   }
   const { data, error } = await admin
     .from("env_vars")
@@ -92,18 +102,15 @@ async function handlePostEnvVar(req: Request, projectId: string, body: any) {
   const user = auth.user;
   const isService = auth.service;
   if (!user && !isService) return json({ error: "unauthorized" }, 401);
-  const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
-  if (!project) return json({ error: "not found" }, 404);
-  if (!isService) {
-    const { data: memberRows } = await admin
-      .from("project_members")
-      .select("user_id")
-      .eq("project_id", projectId)
-      .eq("user_id", user!.id)
-      .limit(1);
-    const isOwner = project.owner_user_id === user!.id;
-    const isMember = (memberRows ?? []).length > 0;
-    if (!isOwner && !isMember) return json({ error: "forbidden" }, 403);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
   }
   const { key, value, service } = body || {};
   if (!key || !value || !service) return json({ error: "key, value, service required" }, 400);
@@ -121,18 +128,15 @@ async function handleDeleteEnvVar(req: Request, projectId: string, body: any) {
   const user = auth.user;
   const isService = auth.service;
   if (!user && !isService) return json({ error: "unauthorized" }, 401);
-  const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
-  if (!project) return json({ error: "not found" }, 404);
-  if (!isService) {
-    const { data: memberRows } = await admin
-      .from("project_members")
-      .select("user_id")
-      .eq("project_id", projectId)
-      .eq("user_id", user!.id)
-      .limit(1);
-    const isOwner = project.owner_user_id === user!.id;
-    const isMember = (memberRows ?? []).length > 0;
-    if (!isOwner && !isMember) return json({ error: "forbidden" }, 403);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
   }
   const { id } = body || {};
   if (!id) return json({ error: "id required" }, 400);
@@ -335,7 +339,21 @@ async function handlePostProjectServiceKey(req: Request, projectId: string, serv
   return json({ serviceKeyName, serviceKey });
 }
 
-async function handleGetVersionSource(projectId: string, versionId: number) {
+async function handleGetVersionSource(req: Request, projectId: string, versionId: number) {
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  const isService = auth.service;
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
+  }
   const { data: build } = await admin
     .from("builds")
     .select("source, source_encoding")
@@ -347,7 +365,21 @@ async function handleGetVersionSource(projectId: string, versionId: number) {
   return json({ source_code: build.source || null, encoding: build.source_encoding || "base64" });
 }
 
-async function handlePostVersionSource(projectId: string, versionId: number, body: any) {
+async function handlePostVersionSource(req: Request, projectId: string, versionId: number, body: any) {
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  const isService = auth.service;
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
+  }
   const source = body?.source as string | undefined;
   const encoding = (body?.encoding as string | undefined) || "r2";
   if (!source) return json({ error: "source is required" }, 400);
@@ -374,7 +406,21 @@ async function handlePostVersionSource(projectId: string, versionId: number, bod
   return json({ ok: true });
 }
 
-async function handleGetChat(projectId: string) {
+async function handleGetChat(req: Request, projectId: string) {
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  const isService = auth.service;
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
+  }
   const { data, error } = await admin.from("messages").select("*").eq("project_id", projectId).order("sequence_number", { ascending: true });
   if (error) return json({ error: error.message }, 500);
   const messages = (data ?? []).map((m: any) => ({
@@ -389,14 +435,11 @@ async function handleGetStagedBuilds(req: Request, projectId: string) {
    */
   const { user } = await getUserOrService(req);
   if (!user) return json({ error: "unauthorized" }, 401);
-  // verify project ownership
-  const { data: project } = await admin
-    .from("projects")
-    .select("owner_user_id")
-    .eq("id", projectId)
-    .single();
-  if (!project) return json({ error: "not found" }, 404);
-  if (project.owner_user_id !== user.id) return json({ error: "forbidden" }, 403);
+  const access = await getProjectAccess(projectId, user.id);
+  if (!access.project) return json({ error: "not found" }, 404);
+  if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+    return json({ error: "forbidden" }, 403);
+  }
   // staged = pending builds with depends_on_build_id set
   const { data: builds, error } = await admin
     .from("builds")
@@ -422,7 +465,17 @@ async function handleGetStagedBuilds(req: Request, projectId: string) {
 }
 
 async function handlePostMessage(req: Request, projectId: string, body: any) {
-  await getUserOrService(req, { allowServiceKey: true });
+  const auth = await getUserOrService(req, { allowServiceKey: true });
+  const user = auth.user;
+  const isService = auth.service;
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  }
   await ensureProject(projectId);
   const message = body || {};
   const model = message.model ? validateModelStub(message.model) : null;
@@ -685,6 +738,11 @@ async function handleGetProjectsStream(req: Request, url: URL) {
 async function handleGetProjectStream(req: Request, url: URL, projectId: string) {
   const userId = await resolveUserIdForStream(req, url);
   if (!userId) return json({ error: "unauthorized" }, 401);
+  const access = await getProjectAccess(projectId, userId);
+  if (!access.project) return json({ error: "not found" }, 404);
+  if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+    return json({ error: "forbidden" }, 403);
+  }
   const pollMsRaw = Number(url.searchParams.get("poll_ms") ?? "4000");
   const pollMs = Number.isFinite(pollMsRaw) ? Math.min(20000, Math.max(2000, pollMsRaw)) : 4000;
   const encoder = new TextEncoder();
@@ -782,6 +840,16 @@ async function handleGetProject(req: Request, projectId: string) {
   const user = auth.user;
   const isService = auth.service;
   if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
+  }
   const payload = await buildProjectPayload(projectId, user?.id);
   if (!payload) return json({ error: "not found" }, 404);
   return json(payload);
@@ -797,6 +865,17 @@ async function handlePostProject(req: Request, body: any) {
   const ownerUserId = user?.id ?? body.owner_user_id ?? body.ownerUserId ?? null;
   if (isService && !ownerUserId) {
     return json({ error: "owner_user_id_required" }, 400);
+  }
+  if (user) {
+    const { data: existing } = await admin
+      .from("projects")
+      .select("owner_user_id")
+      .eq("id", projectId)
+      .maybeSingle();
+    if (existing && existing.owner_user_id !== user.id) {
+      const access = await getProjectAccess(projectId, user.id);
+      if (!access.isAdmin) return json({ error: "forbidden" }, 403);
+    }
   }
   // accept model from body, fall back to default
   const model = validateModelStub(body.model) ?? DEFAULT_MODEL;
@@ -901,6 +980,13 @@ async function handlePatchProject(req: Request, projectId: string, body: any) {
   const user = auth.user;
   const isService = auth.service;
   if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  }
   const updates: any = { updated_at: new Date().toISOString() };
   if (body.name) {
     if (body.name.trim() === "New Project") {
@@ -1046,7 +1132,13 @@ async function handlePatchProject(req: Request, projectId: string, body: any) {
 async function handleDeleteProject(req: Request, projectId: string) {
   const { user } = await getUserOrService(req);
   if (!user) return json({ error: "unauthorized" }, 401);
-  const { error } = await admin.from("projects").delete().eq("id", projectId).eq("owner_user_id", user.id);
+  const access = await getProjectAccess(projectId, user.id);
+  if (!access.project) return json({ error: "not found" }, 404);
+  if (!access.isOwner && !access.isAdmin) return json({ error: "forbidden" }, 403);
+  const query = access.isAdmin
+    ? admin.from("projects").delete().eq("id", projectId)
+    : admin.from("projects").delete().eq("id", projectId).eq("owner_user_id", user.id);
+  const { error } = await query;
   if (error) return json({ error: error.message }, 500);
   return json({ ok: true });
 }
@@ -1102,12 +1194,12 @@ export async function handleProjects(req: Request, segments: string[], url: URL,
   if (segments[2] === "versions" && segments[4] === "source") {
     const projectId = segments[1];
     const versionId = Number(segments[3]);
-    if (method === "GET") return handleGetVersionSource(projectId, versionId);
-    if (method === "POST") return handlePostVersionSource(projectId, versionId, body);
+    if (method === "GET") return handleGetVersionSource(req, projectId, versionId);
+    if (method === "POST") return handlePostVersionSource(req, projectId, versionId, body);
   }
   // GET /projects/{id}/chat
   if (method === "GET" && segments[2] === "chat") {
-    return handleGetChat(segments[1]);
+    return handleGetChat(req, segments[1]);
   }
   // GET /projects/{id}/staged-builds
   if (method === "GET" && segments[2] === "staged-builds") {

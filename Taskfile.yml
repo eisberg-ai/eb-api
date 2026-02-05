@@ -19,7 +19,7 @@ tasks:
   dev:local:
     desc: start local Supabase and serve the API functions
     cmds:
-      - supabase start
+      - supabase stop && supabase start
       - supabase functions serve api --no-verify-jwt
 
   deploy:

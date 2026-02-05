@@ -12,8 +12,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--env",
         action="store",
-        default=None,
-        help="Load env vars from .env.local/.env.prod or a specific env file path.",
+        default="local",
+        help="Load env vars from .env.local/.env.prod or a specific env file path (default: local).",
     )
 
 
