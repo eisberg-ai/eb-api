@@ -1,5 +1,5 @@
 import { json } from "../lib/response.ts";
-import { admin, awsClient, r2Endpoint, r2MediaBucket, r2MediaPublicBase } from "../lib/env.ts";
+import { admin, storageClient, gcsEndpoint, gcsMediaBucket, gcsMediaPublicBase } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { ensureProject } from "../lib/project.ts";
 
@@ -21,35 +21,24 @@ const ALLOWED_AUDIO_TYPES = ["audio/mpeg", "audio/wav", "audio/mp3", "audio/ogg"
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"];
 const ALLOWED_FILE_TYPES = ["application/pdf", "text/plain", "application/json", "image/jpeg", "image/png", "image/gif", "image/webp"];
 
-function getMediaUrl(r2Key: string): string {
-  if (r2MediaPublicBase) {
-    return `${r2MediaPublicBase}/${r2Key}`;
-  }
-  const endpointHost = (() => {
-    try {
-      return new URL(r2Endpoint).host;
-    } catch {
-      return "";
-    }
-  })();
-  if (endpointHost.startsWith("pub-")) {
-    return `${r2Endpoint}/${r2Key}`;
+function getMediaUrl(objectKey: string): string {
+  if (gcsMediaPublicBase) {
+    return `${gcsMediaPublicBase}/${objectKey}`;
   }
   try {
-    const urlObj = new URL(r2Endpoint);
-    const host = urlObj.host;
-    if (host.includes("r2.cloudflarestorage.com")) {
-      return `${urlObj.protocol}//${r2MediaBucket}.${host}/${r2Key}`;
+    const urlObj = new URL(gcsEndpoint);
+    if (urlObj.host.startsWith(`${gcsMediaBucket}.`)) {
+      return `${urlObj.origin}/${objectKey}`;
     }
-  } catch (_e) {
-    // ignore bad endpoint
+  } catch {
+    return `${gcsEndpoint}/${gcsMediaBucket}/${objectKey}`;
   }
-  return `${r2Endpoint}/${r2MediaBucket}/${r2Key}`;
+  return `${gcsEndpoint}/${gcsMediaBucket}/${objectKey}`;
 }
 
 function buildMediaResponse(m: any, type: "audio" | "image") {
   const mediaId = m.id;
-  const r2Key = m.r2_key || m.r2Key;
+  const objectKey = m.r2_key || m.r2Key;
   const apiUrl = `/api/media/${type}/${mediaId}/file`;
   return {
     id: mediaId,
@@ -57,8 +46,8 @@ function buildMediaResponse(m: any, type: "audio" | "image") {
     mimeType: m.mime_type || m.mimeType,
     sizeBytes: m.size_bytes ?? m.sizeBytes,
     createdAt: m.created_at || m.createdAt || new Date().toISOString(),
-    // Prefer a CDN/public R2 URL so the frontend can render <img> tags without auth headers.
-    url: r2Key ? getMediaUrl(r2Key) : apiUrl,
+    // Prefer a CDN/public URL so the frontend can render <img> tags without auth headers.
+    url: objectKey ? getMediaUrl(objectKey) : apiUrl,
     // Keep the API path as a fallback for any authenticated fetches.
     fileUrl: apiUrl,
   };
@@ -151,18 +140,18 @@ async function handleGetMediaFile(req: Request, type: "audio" | "image", mediaId
       return json({ error: "forbidden" }, 403);
     }
   }
-  if (!awsClient) {
+  if (!storageClient) {
     return json({ error: "storage not configured" }, 500);
   }
   try {
-    const objectUrl = new URL(r2Endpoint);
-    const res = await awsClient.fetch(objectUrl.origin, {
+    const objectUrl = new URL(gcsEndpoint);
+    const res = await storageClient.fetch(objectUrl.origin, {
       method: "GET",
-      path: `/${r2MediaBucket}/${media.r2_key}`,
+      path: `/${gcsMediaBucket}/${media.r2_key}`,
     });
     if (!res.ok) {
       const errorText = await res.text();
-      console.error("r2 fetch failed", { status: res.status, error: errorText, r2Key: media.r2_key });
+      console.error("storage fetch failed", { status: res.status, error: errorText, objectKey: media.r2_key });
       return json({ error: `failed to fetch file: ${res.status} ${errorText}` }, 500);
     }
     const body = await res.arrayBuffer();
@@ -202,14 +191,14 @@ async function handlePostFile(req: Request, projectId: string) {
       return json({ error: `file too large. max size: ${MAX_FILE_SIZE / 1024 / 1024}MB` }, 400);
     }
     const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const r2Key = `${projectId}/files/${fileId}-${file.name}`;
+    const objectKey = `${projectId}/files/${fileId}-${file.name}`;
     const fileBuffer = await file.arrayBuffer();
-    if (!awsClient) {
+    if (!storageClient) {
       return json({ error: "storage not configured" }, 500);
     }
-    const objectUrl = new URL(r2Endpoint);
-    const uploadUrl = `${objectUrl.origin}/${r2MediaBucket}/${r2Key}`;
-    const uploadRes = await awsClient.fetch(uploadUrl, {
+    const objectUrl = new URL(gcsEndpoint);
+    const uploadUrl = `${objectUrl.origin}/${gcsMediaBucket}/${objectKey}`;
+    const uploadRes = await storageClient.fetch(uploadUrl, {
       method: "PUT",
       headers: {
         "Content-Type": file.type,
@@ -225,7 +214,7 @@ async function handlePostFile(req: Request, projectId: string) {
       project_id: projectId,
       owner_user_id: user.id,
       type: "file",
-      r2_key: r2Key,
+      r2_key: objectKey,
       filename: file.name,
       mime_type: file.type,
       size_bytes: file.size,
@@ -238,7 +227,7 @@ async function handlePostFile(req: Request, projectId: string) {
       filename: file.name,
       mimeType: file.type,
       sizeBytes: file.size,
-      url: getMediaUrl(r2Key),
+      url: getMediaUrl(objectKey),
       fileUrl: `/api/media/file/${fileId}/file`,
       createdAt: new Date().toISOString(),
     });
@@ -277,14 +266,14 @@ async function handlePostMedia(req: Request, type: "audio" | "image", projectId:
       return json({ error: `file too large. max size: ${MAX_FILE_SIZE / 1024 / 1024}MB` }, 400);
     }
     const mediaId = `media-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    const r2Key = `${projectId}/${type}/${mediaId}-${file.name}`;
+    const objectKey = `${projectId}/${type}/${mediaId}-${file.name}`;
     const fileBuffer = await file.arrayBuffer();
-    if (!awsClient) {
+    if (!storageClient) {
       return json({ error: "storage not configured" }, 500);
     }
-    const objectUrl = new URL(r2Endpoint);
-    const uploadUrl = `${objectUrl.origin}/${r2MediaBucket}/${r2Key}`;
-    const uploadRes = await awsClient.fetch(uploadUrl, {
+    const objectUrl = new URL(gcsEndpoint);
+    const uploadUrl = `${objectUrl.origin}/${gcsMediaBucket}/${objectKey}`;
+    const uploadRes = await storageClient.fetch(uploadUrl, {
       method: "PUT",
       headers: {
         "Content-Type": file.type,
@@ -300,7 +289,7 @@ async function handlePostMedia(req: Request, type: "audio" | "image", projectId:
       project_id: projectId,
       owner_user_id: user.id,
       type,
-      r2_key: r2Key,
+      r2_key: objectKey,
       filename: file.name,
       mime_type: file.type,
       size_bytes: file.size,
@@ -315,7 +304,7 @@ async function handlePostMedia(req: Request, type: "audio" | "image", projectId:
           filename: file.name,
           mime_type: file.type,
           size_bytes: file.size,
-          r2_key: r2Key,
+          r2_key: objectKey,
           created_at: new Date().toISOString(),
         },
         type,
@@ -427,18 +416,18 @@ async function handleGetFile(req: Request, fileId: string) {
       return json({ error: "forbidden" }, 403);
     }
   }
-  if (!awsClient) {
+  if (!storageClient) {
     return json({ error: "storage not configured" }, 500);
   }
   try {
-    const objectUrl = new URL(r2Endpoint);
-    const res = await awsClient.fetch(objectUrl.origin, {
+    const objectUrl = new URL(gcsEndpoint);
+    const res = await storageClient.fetch(objectUrl.origin, {
       method: "GET",
-      path: `/${r2MediaBucket}/${file.r2_key}`,
+      path: `/${gcsMediaBucket}/${file.r2_key}`,
     });
     if (!res.ok) {
       const errorText = await res.text();
-      console.error("r2 fetch failed", { status: res.status, error: errorText, r2Key: file.r2_key });
+      console.error("storage fetch failed", { status: res.status, error: errorText, objectKey: file.r2_key });
       return json({ error: `failed to fetch file: ${res.status} ${errorText}` }, 500);
     }
     const body = await res.arrayBuffer();
@@ -496,4 +485,3 @@ export async function handleMedia(req: Request, segments: string[], _url: URL, _
   }
   return null;
 }
-

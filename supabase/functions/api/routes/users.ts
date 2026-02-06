@@ -135,16 +135,18 @@ async function handleUpdateProfile(req: Request, body: any) {
 async function handleGetOnboarding(req: Request) {
   const { user } = await getUserOrService(req);
   if (!user) return json({ error: "unauthorized" }, 401);
-  const { data: profile } = await admin
+  const { data: profile, error } = await admin
     .from("user_profiles")
     .select("metadata")
     .eq("user_id", user.id)
-    .single();
-  const onboarding = (profile?.metadata as any)?.onboarding ?? null;
+    .maybeSingle();
+  if (error) return json({ error: error.message }, 500);
+  const onboarding = (profile?.metadata as Record<string, unknown> | null)?.onboarding as Record<string, unknown> | null;
+  const answers = (onboarding?.answers ?? {}) as Record<string, unknown>;
   return json({
     completed: onboarding?.completed === true,
     currentStep: onboarding?.currentStep ?? 0,
-    answers: onboarding?.answers ?? {},
+    answers: answers && typeof answers === "object" ? answers : {},
   });
 }
 
@@ -156,18 +158,28 @@ async function handleSubmitOnboarding(req: Request, body: any) {
   if (!user) return json({ error: "unauthorized" }, 401);
   const { completed, currentStep, ...answers } = body;
   // fetch existing metadata
-  const { data: profile } = await admin
+  const { data: profile, error: profileError } = await admin
     .from("user_profiles")
     .select("metadata")
     .eq("user_id", user.id)
-    .single();
+    .maybeSingle();
+  if (profileError) return json({ error: profileError.message }, 500);
   const existingMetadata = (profile?.metadata as Record<string, unknown>) ?? {};
+  const existingOnboarding = (existingMetadata.onboarding as Record<string, unknown> | undefined) ?? {};
+  const existingAnswers = (existingOnboarding.answers as Record<string, unknown> | undefined) ?? {};
+  const mergedAnswers = {
+    ...existingAnswers,
+    ...answers,
+  };
+  const nextCompleted = completed === true ? true : existingOnboarding.completed === true;
+  const nextStep = currentStep ?? existingOnboarding.currentStep ?? 0;
   const updatedMetadata = {
     ...existingMetadata,
     onboarding: {
-      answers,
-      currentStep: currentStep ?? 0,
-      completed: completed === true,
+      ...existingOnboarding,
+      answers: mergedAnswers,
+      currentStep: nextStep,
+      completed: nextCompleted,
       updatedAt: new Date().toISOString(),
     },
   };
@@ -238,6 +250,5 @@ export async function handleUsers(req: Request, segments: string[], _url: URL, b
   }
   return null;
 }
-
 
 

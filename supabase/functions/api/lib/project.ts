@@ -65,10 +65,21 @@ export async function ensureProject(projectId: string, ownerUserId?: string) {
   if (ownerUserId) {
     workspaceId = await getCurrentWorkspaceId(ownerUserId);
   }
+  let isPublic: boolean | undefined;
+  if (ownerUserId) {
+    const { data: subscription } = await admin
+      .from("user_subscriptions")
+      .select("plan_key")
+      .eq("user_id", ownerUserId)
+      .maybeSingle();
+    const planKey = subscription?.plan_key ?? "free";
+    isPublic = planKey === "free";
+  }
   await admin.from("projects").insert({
     id: projectId,
     owner_user_id: owner,
     workspace_id: workspaceId,
     model: DEFAULT_MODEL,
+    ...(isPublic !== undefined ? { is_public: isPublic } : {}),
   });
 }

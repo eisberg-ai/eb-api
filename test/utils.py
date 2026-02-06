@@ -46,8 +46,8 @@ def resolve_env() -> dict[str, str]:
         env.update(load_env_file(Path(env_file_override)))
         apply_backend_base_overrides(env)
         return env
-    env.update(load_env_file(root / ".env.local"))
     env.update(load_env_file(root / ".env.prod"))
+    env.update(load_env_file(root / ".env.local"))
     # Allow backend base overrides for running tests against a separate project.
     apply_backend_base_overrides(env)
     return env

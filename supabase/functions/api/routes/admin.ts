@@ -2,6 +2,7 @@ import { json } from "../lib/response.ts";
 import { admin } from "../lib/env.ts";
 import { getUserOrService, isAdminUser } from "../lib/auth.ts";
 import { generateCode, normalizeCode } from "../lib/codes.ts";
+import { createNotification } from "../lib/notifications.ts";
 
 type CountFilter = { column: string; value: string };
 
@@ -325,6 +326,121 @@ async function handlePromoCodes(url: URL) {
   }
 }
 
+async function getNotificationBroadcastsData(limit: number, offset: number) {
+  const { data, error, count } = await admin
+    .from("notification_broadcasts")
+    .select("id,created_by,created_by_email,title,body,type,action,audience,audience_filter,sent_count,created_at", { count: "exact" })
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (error) throw error;
+  return { rows: data ?? [], total: count ?? 0 };
+}
+
+async function handleNotificationBroadcasts(url: URL) {
+  const { limit, offset } = parsePagination(url);
+  try {
+    return json(await getNotificationBroadcastsData(limit, offset));
+  } catch (err: any) {
+    return json({ error: err.message }, 500);
+  }
+}
+
+function parseUserIds(raw: any): string[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw
+      .map((value) => String(value).trim())
+      .filter(Boolean);
+  }
+  if (typeof raw === "string") {
+    return raw
+      .split(/[\s,]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+async function handleSendNotification(user: any, body: any) {
+  const title = String(body?.title ?? "").trim();
+  const message = String(body?.body ?? body?.message ?? "").trim();
+  if (!title) return json({ error: "title_required" }, 400);
+  if (!message) return json({ error: "body_required" }, 400);
+
+  const type = String(body?.type ?? "admin_broadcast").trim() || "admin_broadcast";
+  const action = body?.action ?? null;
+  const expiresAt = body?.expires_at ?? body?.expiresAt ?? null;
+  const wantsAll = (body?.audience ?? "").toString().toLowerCase() === "all" || body?.all === true;
+
+  let targetUserIds: string[] = [];
+  let audience = "users";
+  let audienceFilter: Record<string, unknown> | null = null;
+
+  if (wantsAll) {
+    const { data, error } = await admin.from("user_profiles").select("user_id");
+    if (error) return json({ error: error.message }, 500);
+    targetUserIds = (data ?? [])
+      .map((row: any) => row.user_id)
+      .filter((id: string | null) => typeof id === "string" && id.length > 0);
+    audience = "all";
+  } else {
+    const parsed = parseUserIds(body?.user_ids ?? body?.userIds ?? body?.user_id ?? body?.userId);
+    targetUserIds = parsed;
+    audience = "users";
+    audienceFilter = { user_ids: targetUserIds };
+  }
+
+  const uniqueUserIds = Array.from(new Set(targetUserIds));
+  if (uniqueUserIds.length === 0) {
+    return json({ error: "target_users_required" }, 400);
+  }
+
+  const now = new Date().toISOString();
+  const broadcastPayload = {
+    created_by: user?.id ?? null,
+    created_by_email: user?.email?.toLowerCase?.() ?? null,
+    title,
+    body: message,
+    type,
+    action,
+    audience,
+    audience_filter: audienceFilter,
+    sent_count: 0,
+    created_at: now,
+  };
+  const { data: broadcast, error: broadcastError } = await admin
+    .from("notification_broadcasts")
+    .insert(broadcastPayload)
+    .select("id,created_at")
+    .single();
+  if (broadcastError) return json({ error: broadcastError.message }, 500);
+
+  for (const userId of uniqueUserIds) {
+    await createNotification({
+      userId,
+      type,
+      title,
+      body: message,
+      action,
+      expiresAt,
+      broadcastId: broadcast.id,
+    });
+  }
+
+  const { error: updateError } = await admin
+    .from("notification_broadcasts")
+    .update({ sent_count: uniqueUserIds.length })
+    .eq("id", broadcast.id);
+  if (updateError) return json({ error: updateError.message }, 500);
+
+  return json({
+    ok: true,
+    broadcast_id: broadcast.id,
+    sent_count: uniqueUserIds.length,
+    created_at: broadcast.created_at ?? now,
+  });
+}
+
 async function handleCluster(url: URL) {
   const { limit, offset } = parsePagination(url);
   try {
@@ -392,7 +508,7 @@ async function handleUserApproval(user: any, userId: string, body: any) {
 
 function resolveAdminTab(raw: string | null): string {
   const tab = (raw ?? "").toLowerCase();
-  const allowed = new Set(["projects", "builds", "jobs", "users", "credits", "invites", "promo-codes", "cluster"]);
+  const allowed = new Set(["projects", "builds", "jobs", "users", "credits", "invites", "promo-codes", "notifications", "cluster"]);
   return allowed.has(tab) ? tab : "projects";
 }
 
@@ -422,6 +538,8 @@ async function getTabData(tab: string, limit: number, offset: number) {
       return await getInvitesData(limit, offset);
     case "promo-codes":
       return await getPromoCodesData(limit, offset);
+    case "notifications":
+      return await getNotificationBroadcastsData(limit, offset);
     case "projects":
     default:
       return await getProjectsData(limit, offset);
@@ -505,6 +623,8 @@ export async function handleAdmin(req: Request, segments: string[], url: URL, bo
   if (req.method === "POST" && segments[1] === "invites") return handleCreateInvite(gate.user, body);
   if (req.method === "GET" && segments[1] === "promo-codes") return handlePromoCodes(url);
   if (req.method === "POST" && segments[1] === "promo-codes") return handleCreatePromoCode(gate.user, body);
+  if (req.method === "GET" && segments[1] === "notifications") return handleNotificationBroadcasts(url);
+  if (req.method === "POST" && segments[1] === "notifications") return handleSendNotification(gate.user, body);
   if (req.method === "GET" && segments[1] === "cluster") return handleCluster(url);
   if (req.method === "POST" && segments[1] === "users" && segments[3] === "approval") {
     return handleUserApproval(gate.user, segments[2], body);

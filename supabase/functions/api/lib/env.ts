@@ -4,29 +4,29 @@ import Stripe from "npm:stripe@16.5.0";
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 const supabaseKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
-const defaultR2 = "https://pub-952a37a2cafd47d487b07d44f3180e45.r2.dev";
-const r2Endpoint = (Deno.env.get("CF_R2_ENDPOINT") ?? defaultR2).replace(/\/+$/, "");
-const r2PreviewBucket = Deno.env.get("CF_R2_PREVIEW_BUCKET") ?? "preview";
-const r2MediaBucket = Deno.env.get("CF_R2_MEDIA_BUCKET") ?? "media";
+const defaultGcs = "https://storage.googleapis.com";
+const gcsEndpoint = (Deno.env.get("GCS_ENDPOINT") ?? defaultGcs).replace(/\/+$/, "");
+const gcsPreviewBucket = Deno.env.get("GCS_PREVIEW_BUCKET") ?? "preview";
+const gcsMediaBucket = Deno.env.get("GCS_MEDIA_BUCKET") ?? "media";
 // public base for media
-const r2MediaPublicBase = (
-  Deno.env.get("CF_R2_MEDIA_PUBLIC_BASE")
-  ?? Deno.env.get("CF_R2_PUBLIC_BASE")
+const gcsMediaPublicBase = (
+  Deno.env.get("GCS_MEDIA_PUBLIC_BASE")
+  ?? Deno.env.get("GCS_PUBLIC_BASE")
   ?? ""
 ).replace(/\/+$/, "");
 // public base for preview
-const r2PreviewPublicBase = (
-  Deno.env.get("CF_R2_PREVIEW_PUBLIC_BASE")
-  ?? Deno.env.get("CF_R2_PUBLIC_BASE")
+const gcsPreviewPublicBase = (
+  Deno.env.get("GCS_PREVIEW_PUBLIC_BASE")
+  ?? Deno.env.get("GCS_PUBLIC_BASE")
   ?? ""
 ).replace(/\/+$/, "");
-const r2AccessKey = Deno.env.get("CF_R2_ACCESS_KEY_ID") ?? "";
-const r2SecretKey = Deno.env.get("CF_R2_SECRET_ACCESS_KEY") ?? "";
+const gcsAccessKey = Deno.env.get("GCS_ACCESS_KEY_ID") ?? "";
+const gcsSecretKey = Deno.env.get("GCS_SECRET_ACCESS_KEY") ?? "";
 
-const awsClient = r2AccessKey && r2SecretKey
+const storageClient = gcsAccessKey && gcsSecretKey
   ? new AwsClient({
-      accessKeyId: r2AccessKey,
-      secretAccessKey: r2SecretKey,
+      accessKeyId: gcsAccessKey,
+      secretAccessKey: gcsSecretKey,
       service: "s3",
       region: "auto",
     })
@@ -34,8 +34,8 @@ const awsClient = r2AccessKey && r2SecretKey
 if (!supabaseUrl || !supabaseKey) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
 }
-if (!awsClient) {
-  console.error("Missing R2 credentials: CF_R2_ACCESS_KEY_ID and/or CF_R2_SECRET_ACCESS_KEY not set");
+if (!storageClient) {
+  console.error("Missing GCS credentials: GCS_ACCESS_KEY_ID and/or GCS_SECRET_ACCESS_KEY not set");
 }
 const admin = createClient(supabaseUrl, supabaseKey);
 
@@ -52,6 +52,10 @@ const defaultCancelUrl = Deno.env.get("BILLING_CANCEL_URL") ?? defaultSuccessUrl
 const publishSecretKey = Deno.env.get("PUBLISH_SECRET_KEY") ?? "";
 const publishSecretKeyId = Deno.env.get("PUBLISH_SECRET_KEY_ID") ?? "default";
 const defaultAgentVersion = Deno.env.get("DEFAULT_AGENT_VERSION") ?? "sonic_2d";
+const expoAccessToken = Deno.env.get("EXPO_ACCESS_TOKEN") ?? "";
+const vapidPublicKey = Deno.env.get("VAPID_PUBLIC_KEY") ?? "";
+const vapidPrivateKey = Deno.env.get("VAPID_PRIVATE_KEY") ?? "";
+const vapidSubject = Deno.env.get("VAPID_SUBJECT") ?? "";
 
 /** Public API base URL for service proxy links. Prefer PUBLIC_API_URL env; else derive from request. */
 function getApiBaseUrl(req?: Request): string {
@@ -67,12 +71,12 @@ function getApiBaseUrl(req?: Request): string {
 
 export {
   admin,
-  awsClient,
-  r2Endpoint,
-  r2PreviewBucket,
-  r2MediaBucket,
-  r2MediaPublicBase,
-  r2PreviewPublicBase,
+  storageClient,
+  gcsEndpoint,
+  gcsPreviewBucket,
+  gcsMediaBucket,
+  gcsMediaPublicBase,
+  gcsPreviewPublicBase,
   stripe,
   stripeWebhookSecret,
   defaultSuccessUrl,
@@ -81,5 +85,9 @@ export {
   publishSecretKey,
   publishSecretKeyId,
   defaultAgentVersion,
+  expoAccessToken,
+  vapidPublicKey,
+  vapidPrivateKey,
+  vapidSubject,
   getApiBaseUrl,
 };

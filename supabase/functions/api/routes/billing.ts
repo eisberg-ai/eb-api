@@ -2,6 +2,8 @@ import { json } from "../lib/response.ts";
 import { admin, stripe, stripeWebhookSecret, defaultSuccessUrl, defaultCancelUrl } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { PLANS, getPlan, type PlanKey } from "../lib/plans.ts";
+import { createNotification } from "../lib/notifications.ts";
+import { clearPrivateExpiryForUser, computePrivateExpiryAt, markPrivateProjectsPendingExpiry } from "../lib/privateProjects.ts";
 import { MIN_BUILD_BALANCE, spendBuildCredits } from "../lib/build.ts";
 import { DEFAULT_LLM_PRICING, PLATFORM_FEE_RATE, parseLlmPricing, quoteLlmUsage } from "../lib/llm_pricing.ts";
 import type Stripe from "npm:stripe@16.5.0";
@@ -621,6 +623,19 @@ async function handlePostWebhook(req: Request, rawBody: string) {
             credits_allocated_this_period: isDowngrade ? (existingSub?.credits_allocated_this_period ?? plan.creditsMonthly) : plan.creditsMonthly,
             updated_at: new Date().toISOString(),
           }, { onConflict: "user_id" });
+          const isUpgradeFromFree = !oldPlanKey || oldPlanKey === "free";
+          if (plan.key !== "free") {
+            await clearPrivateExpiryForUser(userId);
+            if (isUpgradeFromFree) {
+              await createNotification({
+                userId,
+                type: "upgrade_make_all_private",
+                title: "Make projects private?",
+                body: "You're on a paid plan. Make all your projects private in one click.",
+                action: { type: "make_all_private" },
+              });
+            }
+          }
           if (event.type === "customer.subscription.created") {
             await applyCreditDelta({
               userId,
@@ -658,10 +673,25 @@ async function handlePostWebhook(req: Request, rawBody: string) {
       const subscription = event.data.object as Stripe.Subscription;
       const userId = subscription.metadata?.user_id;
       if (userId) {
+        const now = new Date().toISOString();
         await admin.from("user_subscriptions").update({
           status: "canceled",
-          updated_at: new Date().toISOString(),
+          plan_key: "free",
+          updated_at: now,
         }).eq("stripe_subscription_id", subscription.id);
+        const expiryAt = computePrivateExpiryAt();
+        const { totalPrivate } = await markPrivateProjectsPendingExpiry(userId, expiryAt);
+        if (totalPrivate > 0) {
+          const expiryLabel = expiryAt.split("T")[0];
+          await createNotification({
+            userId,
+            type: "private_projects_pending_expiry",
+            title: "Private projects expiring",
+            body: `Your private projects will be removed after 30 days (on ${expiryLabel}) unless you renew. Make them public to avoid removal.`,
+            action: { type: "manage_privacy", expires_at: expiryAt },
+            expiresAt: expiryAt,
+          });
+        }
       }
     } else if (event.type === "invoice.payment_succeeded") {
       const invoice = event.data.object as Stripe.Invoice;
@@ -671,8 +701,11 @@ async function handlePostWebhook(req: Request, rawBody: string) {
         if (sub) {
           const plan = getPlan(sub.plan_key);
           if (plan) {
-            const invoicePeriodStart = invoice.period_start ? new Date(invoice.period_start * 1000).toISOString() : null;
-            const isRenewal = sub.current_period_start === invoicePeriodStart;
+            const invoicePeriodStart = typeof invoice.period_start === "number" ? invoice.period_start : null;
+            const subPeriodMs = sub.current_period_start ? new Date(sub.current_period_start).getTime() : NaN;
+            const isRenewal = invoicePeriodStart !== null && Number.isFinite(subPeriodMs)
+              ? Math.floor(subPeriodMs / 1000) === invoicePeriodStart
+              : false;
             if (isRenewal) {
               await applyCreditDelta({
                 userId: sub.user_id,

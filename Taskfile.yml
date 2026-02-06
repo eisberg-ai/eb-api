@@ -26,6 +26,31 @@ tasks:
     desc: deploy API to production (Supabase)
     cmds:
       - |
+        set -euo pipefail
+        echo "=== checking for unstaged changes ==="
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+          echo "error: unstaged or uncommitted changes detected" >&2
+          echo "please commit or stash your changes before deploying" >&2
+          git status --short
+          exit 1
+        fi
+        echo "✓ no unstaged changes"
+      - |
+        set -euo pipefail
+        echo "=== checking for unpushed commits ==="
+        UPSTREAM="$(git rev-parse --abbrev-ref @{u} 2>/dev/null || true)"
+        if [ -z "${UPSTREAM}" ]; then
+          echo "error: current branch has no upstream. Push and set upstream before deploying." >&2
+          exit 1
+        fi
+        if git rev-list @{u}..HEAD 2>/dev/null | grep -q .; then
+          echo "error: you have commits that are not pushed to ${UPSTREAM}" >&2
+          echo "please push your changes before deploying" >&2
+          git log @{u}..HEAD --oneline
+          exit 1
+        fi
+        echo "✓ all commits pushed"
+      - |
         echo ""
         echo "=== Pre-deploy checklist ==="
         echo ""
@@ -44,6 +69,31 @@ tasks:
   deploy:force:
     desc: deploy API without e2e confirmation (use with caution)
     cmds:
+      - |
+        set -euo pipefail
+        echo "=== checking for unstaged changes ==="
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+          echo "error: unstaged or uncommitted changes detected" >&2
+          echo "please commit or stash your changes before deploying" >&2
+          git status --short
+          exit 1
+        fi
+        echo "✓ no unstaged changes"
+      - |
+        set -euo pipefail
+        echo "=== checking for unpushed commits ==="
+        UPSTREAM="$(git rev-parse --abbrev-ref @{u} 2>/dev/null || true)"
+        if [ -z "${UPSTREAM}" ]; then
+          echo "error: current branch has no upstream. Push and set upstream before deploying." >&2
+          exit 1
+        fi
+        if git rev-list @{u}..HEAD 2>/dev/null | grep -q .; then
+          echo "error: you have commits that are not pushed to ${UPSTREAM}" >&2
+          echo "please push your changes before deploying" >&2
+          git log @{u}..HEAD --oneline
+          exit 1
+        fi
+        echo "✓ all commits pushed"
       - supabase secrets set --env-file .env.prod
       - task: supabase:deploy
 
@@ -89,6 +139,11 @@ tasks:
     desc: show Supabase emulator status and connection info
     cmds:
       - supabase status
+
+  stripe:local:
+    desc: start Stripe CLI webhook listener for local billing tests
+    cmds:
+      - stripe listen --forward-to localhost:54321/functions/v1/api/billing/webhook
 
   supabase:reset:
     desc: reset Supabase database and apply schema (local)

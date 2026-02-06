@@ -97,20 +97,22 @@ def test_onboarding_submit_updates_previous() -> None:
     headers = auth_headers(access_token)
 
     # submit step 1
-    requests.post(
+    first_resp = requests.post(
         f"{api_url}/users/onboarding",
         headers=headers,
         json={"motivation": "learning", "currentStep": 1},
         timeout=15,
     )
+    assert first_resp.status_code == 200, first_resp.text
 
-    # submit step 2 with additional data
-    requests.post(
+    # submit step 2 with additional data (partial update)
+    second_resp = requests.post(
         f"{api_url}/users/onboarding",
         headers=headers,
-        json={"motivation": "learning", "goal": "social", "currentStep": 2},
+        json={"goal": "social", "currentStep": 2},
         timeout=15,
     )
+    assert second_resp.status_code == 200, second_resp.text
 
     # verify both answers are present
     status_resp = requests.get(f"{api_url}/users/onboarding", headers=headers, timeout=15)

@@ -12,6 +12,7 @@ import { handleGenerate } from "./routes/generate.ts";
 import { handleServices } from "./routes/services.ts";
 import { handleMedia } from "./routes/media.ts";
 import { handleUsers } from "./routes/users.ts";
+import { handleNotifications } from "./routes/notifications.ts";
 import { handlePublish } from "./routes/publish.ts";
 import { handleAdmin } from "./routes/admin.ts";
 import { handleInvites } from "./routes/invites.ts";
@@ -94,6 +95,9 @@ export const handler = async (req: Request) => {
 
     const usersHandled = maybeWithCors(await handleUsers(req, segments, url, body));
     if (usersHandled) return usersHandled;
+
+    const notificationsHandled = maybeWithCors(await handleNotifications(req, segments, url, body));
+    if (notificationsHandled) return notificationsHandled;
 
     const invitesHandled = maybeWithCors(await handleInvites(req, segments, url, body));
     if (invitesHandled) return invitesHandled;

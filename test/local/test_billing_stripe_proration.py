@@ -132,26 +132,40 @@ def advance_test_clock(stripe_key: str, clock_id: str, target_time: int) -> None
     raise AssertionError("test clock did not advance to target time")
 
 
-def wait_for_proration_invoice(
+def is_proration_line(line: dict) -> bool:
+    if line.get("proration") is True or line.get("proration_details"):
+        return True
+    description = (line.get("description") or "").lower()
+    return "unused time" in description or "remaining time" in description
+
+
+def get_proration_preview(
     stripe_key: str,
+    *,
+    customer_id: str,
     subscription_id: str,
+    subscription_item_id: str,
+    new_price_id: str,
+    proration_time: int,
 ) -> tuple[dict, list[dict]]:
-    deadline = time.time() + 45
-    while time.time() < deadline:
-        sub = stripe_request(
-            "GET",
-            f"/v1/subscriptions/{subscription_id}",
-            stripe_key,
-            params=[("expand[]", "latest_invoice.lines")],
-        )
-        invoice = sub.get("latest_invoice")
-        if isinstance(invoice, dict):
-            lines = (invoice.get("lines") or {}).get("data") or []
-            proration_lines = [line for line in lines if line.get("proration")]
-            if proration_lines:
-                return invoice, proration_lines
-        time.sleep(1)
-    raise AssertionError("proration invoice not found")
+    preview = stripe_request(
+        "POST",
+        "/v1/invoices/create_preview",
+        stripe_key,
+        data={
+            "customer": customer_id,
+            "subscription": subscription_id,
+            "subscription_details[items][0][id]": subscription_item_id,
+            "subscription_details[items][0][price]": new_price_id,
+            "subscription_details[proration_behavior]": "create_prorations",
+            "subscription_details[proration_date]": str(proration_time),
+        },
+    )
+    lines = (preview.get("lines") or {}).get("data") or []
+    proration_lines = [line for line in lines if is_proration_line(line)]
+    if not proration_lines:
+        raise AssertionError("proration preview not found")
+    return preview, proration_lines
 
 
 def expected_proration_cents(
@@ -170,12 +184,22 @@ def expected_proration_cents(
     return int(round(diff * fraction)), fraction
 
 
-def sum_proration_by_price(proration_lines: list[dict]) -> dict[str, int]:
+def sum_proration_by_price(
+    proration_lines: list[dict],
+    *,
+    label_map: dict[str, str] | None = None,
+) -> dict[str, int]:
     totals: dict[str, int] = {}
     for line in proration_lines:
         price = line.get("price") or {}
         plan = line.get("plan") or {}
         price_id = price.get("id") or plan.get("id")
+        if not price_id and label_map:
+            description = (line.get("description") or "").lower()
+            for label, mapped_price in label_map.items():
+                if label.lower() in description:
+                    price_id = mapped_price
+                    break
         if not price_id:
             continue
         totals[price_id] = totals.get(price_id, 0) + int(line.get("amount") or 0)
@@ -215,10 +239,7 @@ def run_proration_case(
         stripe_key,
         data={
             "type": "card",
-            "card[number]": "4242424242424242",
-            "card[exp_month]": "12",
-            "card[exp_year]": "2040",
-            "card[cvc]": "123",
+            "card[token]": "tok_visa",
         },
     )
     stripe_request(
@@ -244,10 +265,14 @@ def run_proration_case(
             "metadata[plan_key]": old_plan_key,
         },
     )
-    period_start = int(subscription["current_period_start"])
-    period_end = int(subscription["current_period_end"])
+    items = (subscription.get("items") or {}).get("data") or []
+    item = items[0] if items else {}
+    subscription_item_id = item.get("id")
+    period_start = int(item.get("current_period_start") or subscription.get("current_period_start") or 0)
+    period_end = int(item.get("current_period_end") or subscription.get("current_period_end") or 0)
     duration = period_end - period_start
     assert duration > 0, "subscription period duration must be > 0"
+    assert subscription_item_id, "subscription item id missing"
     remaining_seconds = max(1, int(round(duration * remaining_fraction)))
     proration_time = period_end - remaining_seconds
     if proration_time < period_start:
@@ -281,6 +306,15 @@ def run_proration_case(
     if proration_time != period_start:
         advance_test_clock(stripe_key, clock["id"], proration_time)
 
+    preview, proration_lines = get_proration_preview(
+        stripe_key,
+        customer_id=customer["id"],
+        subscription_id=subscription["id"],
+        subscription_item_id=subscription_item_id,
+        new_price_id=new_price_id,
+        proration_time=proration_time,
+    )
+
     resp = requests.post(
         f"{api_url}/billing/subscription-checkout",
         headers=auth_headers(access_token),
@@ -291,7 +325,15 @@ def run_proration_case(
     payload = resp.json()
     assert payload.get("updated") is True, payload
 
-    invoice, proration_lines = wait_for_proration_invoice(stripe_key, subscription["id"])
+    updated_subscription = stripe_request(
+        "GET",
+        f"/v1/subscriptions/{subscription['id']}",
+        stripe_key,
+    )
+    updated_items = (updated_subscription.get("items") or {}).get("data") or []
+    updated_item = updated_items[0] if updated_items else {}
+    updated_price_id = (updated_item.get("price") or {}).get("id")
+    assert updated_price_id == new_price_id, "subscription price not updated"
     proration_total = sum(int(line.get("amount") or 0) for line in proration_lines)
     expected_total, fraction = expected_proration_cents(
         old_amount,
@@ -301,7 +343,7 @@ def run_proration_case(
         proration_time,
     )
     return {
-        "invoice": invoice,
+        "invoice": preview,
         "proration_lines": proration_lines,
         "proration_total": proration_total,
         "expected_total": expected_total,
@@ -386,7 +428,11 @@ def test_stripe_subscription_proration(
     assert proration_total * diff > 0, "proration total should follow upgrade/downgrade direction"
     assert abs(proration_total - expected_total) <= 1, (proration_total, expected_total)
 
-    totals_by_price = sum_proration_by_price(result["proration_lines"])
+    label_map = {
+        f"{old_plan_key.capitalize()} Plan": old_price_id,
+        f"{new_plan_key.capitalize()} Plan": new_price_id,
+    }
+    totals_by_price = sum_proration_by_price(result["proration_lines"], label_map=label_map)
     assert old_price_id in totals_by_price, "missing proration for old plan"
     assert new_price_id in totals_by_price, "missing proration for new plan"
 

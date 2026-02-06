@@ -7,9 +7,9 @@ Full app lifecycle E2E test:
 5. Send prompt with services + backend (POST /chat)
 6. VM acquired (via startVm flow)
 7. Build completes (poll /builds/{id})
-8. Preview served (GET /preview/{projectId}/{version}/)
-9. Share preview (PATCH /projects/{id} with is_public=true)
-10. Verify public accessibility
+8. Preview served (GET /preview/{buildId}/)
+9. Share preview (POST /preview/share)
+10. Verify share accessibility
 """
 from __future__ import annotations
 
@@ -186,42 +186,27 @@ def test_full_app_lifecycle(
     assert preview_accessible, f"Preview not accessible: {api_preview_url}"
     print("[e2e] Preview is accessible")
 
-    # Step 6: Get version number for preview path test
-    version_id = final_build.get("version_id") or final_build.get("version_number")
-    if version_id:
-        api_preview_url = f"{api_url}/preview/{project_id}/{version_id}/"
-        print(f"[e2e] Testing API preview route: {api_preview_url}")
-        api_preview_resp = requests.get(
-            api_preview_url,
-            headers=auth_headers(user_token),
-            timeout=30,
-            allow_redirects=True,
-        )
-        # May return 200 with shell or redirect
-        assert api_preview_resp.status_code in (200, 302, 307), f"API preview failed: {api_preview_resp.status_code}"
-
-    # Step 7: Share preview (set is_public=true)
-    print("[e2e] Step 7: Sharing preview (setting is_public=true)...")
-    share_resp = requests.patch(
-        f"{api_url}/projects/{project_id}",
-        json={"is_public": True},
+    # Step 6: Share preview (secure link)
+    print("[e2e] Step 6: Creating share token...")
+    share_resp = requests.post(
+        f"{api_url}/preview/share",
+        json={"project_id": project_id, "build_id": build_id},
         headers=auth_headers(user_token),
         timeout=20,
     )
-    assert share_resp.status_code == 200, f"Share failed: {share_resp.text}"
+    assert share_resp.status_code == 200, f"Share token failed: {share_resp.text}"
+    share_payload = share_resp.json()
+    share_token = share_payload.get("token")
+    assert share_token, f"Missing share token: {share_payload}"
 
-    # Verify project is now public
-    project_check = requests.get(
-        f"{api_url}/projects/{project_id}",
-        headers=auth_headers(user_token),
-        timeout=20,
-    )
-    assert project_check.status_code == 200
-    assert project_check.json().get("is_public") is True, "Project not marked as public"
-    print("[e2e] Project is now public")
+    share_preview_url = f"{api_url}/preview/share/{share_token}/"
+    print(f"[e2e] Share preview URL: {share_preview_url}")
+    share_ok = verify_preview_accessible(share_preview_url)
+    assert share_ok, "Share preview not accessible"
+    print("[e2e] Share preview is accessible")
 
-    # Step 8: Verify preview requires auth
-    print("[e2e] Step 8: Verifying preview requires auth...")
+    # Step 7: Verify build preview requires auth
+    print("[e2e] Step 7: Verifying build preview requires auth...")
     unauth_resp = requests.get(api_preview_url, timeout=30, allow_redirects=True)
     assert unauth_resp.status_code in (401, 403), f"Preview should require auth: {unauth_resp.status_code}"
 

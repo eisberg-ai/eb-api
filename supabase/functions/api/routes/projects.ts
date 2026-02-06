@@ -3,6 +3,7 @@ import { admin, defaultAgentVersion, getApiBaseUrl } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { getProjectAccess } from "../lib/access.ts";
 import { ensureProject, getCurrentWorkspaceId, DEFAULT_MODEL, isProModel, normalizeProjectStatus, validateModelStub } from "../lib/project.ts";
+import { createNotification } from "../lib/notifications.ts";
 import { callLLM } from "../lib/llm.ts";
 import { getServicesRegistry } from "../lib/registry.ts";
 import { sha256Hex } from "../lib/crypto.ts";
@@ -24,6 +25,19 @@ async function generateTitleFromPrompt(prompt: string): Promise<string | null> {
     console.error("failed to generate title", err);
   }
   return null;
+}
+
+async function resolvePlanKey(userId?: string | null): Promise<string> {
+  if (!userId) return "free";
+  const { data: subscription, error } = await admin
+    .from("user_subscriptions")
+    .select("plan_key")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (error) {
+    console.error("[projects] subscription lookup error", error);
+  }
+  return subscription?.plan_key ?? "free";
 }
 
 async function handleGetVersions(req: Request, segments: string[], url: URL) {
@@ -176,9 +190,17 @@ async function handleGetProjectServices(req: Request, projectId: string) {
   const auth = await getUserOrService(req, { allowServiceKey: true });
   const user = auth.user;
   const isService = auth.service;
-  if (!isService) return json({ error: "unauthorized" }, 401);
-  const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
-  if (!project) return json({ error: "not found" }, 404);
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
+  }
   const { data, error } = await admin
     .from("project_services")
     .select("service_stub, config, enabled, disabled_reason, disabled_at")
@@ -215,7 +237,14 @@ async function handlePostProjectService(req: Request, projectId: string, body: a
   const auth = await getUserOrService(req, { allowServiceKey: true });
   const user = auth.user;
   const isService = auth.service;
-  if (!isService) return json({ error: "unauthorized" }, 401);
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  }
   const { data: project } = await admin.from("projects").select("owner_user_id, backend_enabled").eq("id", projectId).single();
   if (!project) return json({ error: "not found" }, 404);
   // Require backend to be enabled before services can be added
@@ -266,9 +295,17 @@ async function handleDeleteProjectService(req: Request, projectId: string, servi
   const auth = await getUserOrService(req, { allowServiceKey: true });
   const user = auth.user;
   const isService = auth.service;
-  if (!isService) return json({ error: "unauthorized" }, 401);
-  const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
-  if (!project) return json({ error: "not found" }, 404);
+  if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  if (user) {
+    const access = await getProjectAccess(projectId, user.id);
+    if (!access.project) return json({ error: "not found" }, 404);
+    if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+      return json({ error: "forbidden" }, 403);
+    }
+  } else {
+    const { data: project } = await admin.from("projects").select("id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
+  }
   const stub = serviceStub?.toString();
   if (!stub) return json({ error: "serviceStub required" }, 400);
   const { error } = await admin
@@ -381,7 +418,7 @@ async function handlePostVersionSource(req: Request, projectId: string, versionI
     if (!project) return json({ error: "not found" }, 404);
   }
   const source = body?.source as string | undefined;
-  const encoding = (body?.encoding as string | undefined) || "r2";
+  const encoding = (body?.encoding as string | undefined) || "gcs";
   if (!source) return json({ error: "source is required" }, 400);
   const { data: build } = await admin
     .from("builds")
@@ -517,7 +554,7 @@ async function handlePostMessage(req: Request, projectId: string, body: any) {
 async function fetchProjectsForUser(userId: string, includeDrafts: boolean) {
   const { data: ownedProjects, error: ownedErr } = await admin
     .from("projects")
-    .select("id, name, owner_user_id, current_version_number, latest_build_id, created_at, updated_at, model, is_public, workspace_id, status")
+    .select("id, name, owner_user_id, current_version_number, latest_build_id, created_at, updated_at, model, is_public, private_pending_expiry, private_expiry_at, workspace_id, status")
     .eq("owner_user_id", userId);
   if (ownedErr) {
     console.error("[projects] ownedProjects error", ownedErr);
@@ -545,6 +582,8 @@ async function fetchProjectsForUser(userId: string, includeDrafts: boolean) {
     last_edited: p.updated_at ? new Date(p.updated_at).toLocaleDateString() : "never",
     model: (p.model as string | undefined) || null,
     is_public: !!p.is_public,
+    private_pending_expiry: !!p.private_pending_expiry,
+    private_expiry_at: p.private_expiry_at ?? null,
     workspace_id: p.workspace_id ?? null,
     status: (p.status as string | undefined) ?? null,
     current_version_id: p.current_version_number ?? null,
@@ -644,6 +683,8 @@ async function buildProjectPayload(projectId: string, userId?: string) {
     })),
     model: project.model ?? null,
     is_public: !!project.is_public,
+    private_pending_expiry: !!project.private_pending_expiry,
+    private_expiry_at: project.private_expiry_at ?? null,
     is_gallery: !!project.is_gallery,
     gallery_slug: project.gallery_slug ?? null,
     gallery: project.gallery ?? null,
@@ -879,22 +920,24 @@ async function handlePostProject(req: Request, body: any) {
   }
   // accept model from body, fall back to default
   const model = validateModelStub(body.model) ?? DEFAULT_MODEL;
-  let planKey = "free";
-  if (user) {
-    const { data: subscription, error: subscriptionError } = await admin
-      .from("user_subscriptions")
-      .select("plan_key")
-      .eq("user_id", user.id)
-      .maybeSingle();
-    if (subscriptionError) {
-      console.error("[projects] subscription lookup error", subscriptionError);
-    }
-    planKey = subscription?.plan_key ?? "free";
-    if (planKey === "free" && isProModel(model)) {
-      return json({ error: "model_requires_plan", message: "Upgrade required for this model." }, 403);
-    }
+  const planKey = await resolvePlanKey(ownerUserId || user?.id || null);
+  if (planKey === "free" && isProModel(model)) {
+    return json({ error: "model_requires_plan", message: "Upgrade required for this model." }, 403);
   }
-  const isPublic = body.is_public ?? body.isPublic ?? false;
+  const isPublicRaw = body.is_public ?? body.isPublic;
+  const isPublic = isPublicRaw !== undefined ? !!isPublicRaw : planKey === "free";
+  if (planKey === "free" && !isPublic) {
+    if (ownerUserId) {
+      await createNotification({
+        userId: ownerUserId,
+        type: "private_project_requires_plan",
+        title: "Private projects require a plan",
+        body: "Upgrade to a paid plan to make projects private.",
+        action: { type: "upgrade" },
+      });
+    }
+    return json({ error: "private_project_requires_plan", message: "Upgrade required for private projects." }, 403);
+  }
   let workspaceId = body.workspace_id ?? body.workspaceId ?? null;
   const initialPrompt = body.initial_prompt ?? body.initialPrompt as string | undefined;
   if (name === "New Project" && initialPrompt && initialPrompt.trim()) {
@@ -975,17 +1018,47 @@ async function handlePostProject(req: Request, body: any) {
   });
 }
 
+async function handleMakeAllPrivate(req: Request) {
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const planKey = await resolvePlanKey(user.id);
+  if (planKey === "free") {
+    return json({ error: "private_project_requires_plan", message: "Upgrade required for private projects." }, 403);
+  }
+  const { data, error } = await admin
+    .from("projects")
+    .update({
+      is_public: false,
+      private_pending_expiry: false,
+      private_expiry_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("owner_user_id", user.id)
+    .select("id");
+  if (error) return json({ error: error.message }, 500);
+  return json({
+    updated: data?.length ?? 0,
+    project_ids: (data ?? []).map((row: any) => row.id),
+  });
+}
+
 async function handlePatchProject(req: Request, projectId: string, body: any) {
   const auth = await getUserOrService(req, { allowServiceKey: true });
   const user = auth.user;
   const isService = auth.service;
   if (!user && !isService) return json({ error: "unauthorized" }, 401);
+  let projectOwnerId: string | null = null;
   if (user) {
     const access = await getProjectAccess(projectId, user.id);
     if (!access.project) return json({ error: "not found" }, 404);
     if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
       return json({ error: "forbidden" }, 403);
     }
+    projectOwnerId = access.project.owner_user_id ?? null;
+  } else {
+    const { data: project } = await admin.from("projects").select("owner_user_id").eq("id", projectId).single();
+    if (!project) return json({ error: "not found" }, 404);
+    projectOwnerId = project.owner_user_id ?? null;
   }
   const updates: any = { updated_at: new Date().toISOString() };
   if (body.name) {
@@ -1020,8 +1093,31 @@ async function handlePatchProject(req: Request, projectId: string, body: any) {
     }
     updates.model = validated;
   }
-  const isPublic = body.is_public ?? body.isPublic;
-  if (isPublic !== undefined) updates.is_public = !!isPublic;
+  const isPublicRaw = body.is_public ?? body.isPublic;
+  if (isPublicRaw !== undefined) {
+    const nextIsPublic = !!isPublicRaw;
+    if (!nextIsPublic) {
+      const planKey = await resolvePlanKey(projectOwnerId);
+      if (planKey === "free") {
+        if (projectOwnerId) {
+          await createNotification({
+            userId: projectOwnerId,
+            type: "private_project_requires_plan",
+            title: "Private projects require a plan",
+            body: "Upgrade to a paid plan to make projects private.",
+            action: { type: "upgrade" },
+          });
+        }
+        return json({ error: "private_project_requires_plan", message: "Upgrade required for private projects." }, 403);
+      }
+      updates.private_pending_expiry = false;
+      updates.private_expiry_at = null;
+    } else {
+      updates.private_pending_expiry = false;
+      updates.private_expiry_at = null;
+    }
+    updates.is_public = nextIsPublic;
+  }
   const gallerySlugRaw = body.gallery_slug ?? body.gallerySlug;
   if (gallerySlugRaw !== undefined) {
     const gallerySlug = typeof gallerySlugRaw === "string" ? gallerySlugRaw.trim() : gallerySlugRaw;
@@ -1156,6 +1252,9 @@ export async function handleProjects(req: Request, segments: string[], url: URL,
   }
   if (method === "POST" && segments[1] === "drafts" && segments[2] === "cleanup") {
     return handleCleanupDraftProjects(req, body);
+  }
+  if (method === "POST" && segments[1] === "make_all_private") {
+    return handleMakeAllPrivate(req);
   }
   // GET /projects/versions
   if (method === "GET" && segments[1] === "versions") {

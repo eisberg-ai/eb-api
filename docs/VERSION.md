@@ -21,7 +21,7 @@
 
 # 0.4 (completed friday)
 - [x] create containerized worker which test-builds and serves web preview
-    - cloudflare r2 for static web preview hosting
+    - gcs for static web preview hosting
     - docker for worker container
     - offline- and online-mode for worker ai agent
 - [x] migrate backend paradigm to "warp"
