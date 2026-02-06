@@ -6,16 +6,6 @@ tasks:
     cmds:
       - task --list
 
-  start:
-    desc: start the API local server
-    cmds:
-      - supabase start
-
-  serve:
-    desc: serve the API functions locally
-    cmds:
-      - supabase functions serve api --no-verify-jwt
-
   dev:local:
     desc: start local Supabase and serve the API functions
     cmds:
@@ -64,7 +54,7 @@ tasks:
           exit 1
         fi
       - supabase secrets set --env-file .env.prod
-      - task: supabase:deploy
+      - task: _supabase:deploy
 
   deploy:force:
     desc: deploy API without e2e confirmation (use with caution)
@@ -95,79 +85,11 @@ tasks:
         fi
         echo "✓ all commits pushed"
       - supabase secrets set --env-file .env.prod
-      - task: supabase:deploy
-
-  ###
-
-  supabase:link:
-    desc: link local Supabase project to hosted project
-    cmds:
-      - supabase link --project-ref {{.SUPABASE_PROJECT_REF}}
-
-  supabase:db:push:
-    desc: push database migrations to linked Supabase project
-    cmds:
-      - supabase db push
-
-  supabase:functions:deploy:
-    desc: deploy edge functions to linked Supabase project
-    cmds:
-      - supabase functions deploy api
-
-  supabase:deploy:
-    desc: deploy Supabase backend (migrations + functions)
-    cmds:
-      - task: supabase:db:push
-      - task: supabase:functions:deploy
-
-  supabase:init:
-    desc: initialize Supabase project (run once)
-    cmds:
-      - supabase init
-
-  supabase:start:
-    desc: start local Supabase emulator
-    cmds:
-      - supabase start
-
-  supabase:stop:
-    desc: stop local Supabase emulator
-    cmds:
-      - supabase stop
-
-  supabase:status:
-    desc: show Supabase emulator status and connection info
-    cmds:
-      - supabase status
-
-  stripe:local:
-    desc: start Stripe CLI webhook listener for local billing tests
-    cmds:
-      - stripe listen --forward-to localhost:54321/functions/v1/api/billing/webhook
-
-  supabase:reset:
-    desc: reset Supabase database and apply schema (local)
-    cmds:
-      - supabase db reset
-
-  supabase:reset-remote:
-    desc: 'reset remote Supabase database (WARNING: deletes all data)'
-    cmds:
-      - supabase db reset --linked
-
-  supabase:studio:
-    desc: open Supabase Studio UI in browser
-    cmds:
-      - supabase studio
+      - task: _supabase:deploy
 
   ###
   # Tests
   ###
-
-  test:
-    desc: run unit + local tests (pre-commit)
-    cmds:
-      - pytest test/unit/ test/local/ -v --env local
 
   test:unit:
     desc: run unit tests only (no services needed)
@@ -221,7 +143,7 @@ tasks:
     cmds:
       - |
         echo "Running e2e tests against local environment..."
-        echo "Prerequisites: supabase running (task start), VMs registered"
+        echo "Prerequisites: supabase running (task dev:local), VMs registered"
         pytest test/e2e/ -v -m e2e -s --env local
 
   test:e2e:prod:
@@ -231,7 +153,82 @@ tasks:
         echo "Running e2e tests against production..."
         pytest test/e2e/ -v -m e2e -s --env prod
 
+  test:lint:
+    desc: run linting (deno for functions, ruff for Python tests)
+    cmds:
+      - deno lint supabase/functions/
+      - ruff check .
+
+  ###
+  # Setup
+  ###
+
   hooks:install:
     desc: install git pre-commit hooks
     cmds:
       - ./scripts/install-hooks.sh
+
+  ###
+  # Internal Tasks
+  ###
+
+  _supabase:link:
+    desc: link local Supabase project to hosted project
+    cmds:
+      - supabase link --project-ref {{.SUPABASE_PROJECT_REF}}
+
+  _supabase:db:push:
+    desc: push database migrations to linked Supabase project
+    cmds:
+      - supabase db push
+
+  _supabase:functions:deploy:
+    desc: deploy edge functions to linked Supabase project
+    cmds:
+      - supabase functions deploy api
+
+  _supabase:deploy:
+    desc: deploy Supabase backend (migrations + functions)
+    cmds:
+      - task: _supabase:db:push
+      - task: _supabase:functions:deploy
+
+  _supabase:init:
+    desc: initialize Supabase project (run once)
+    cmds:
+      - supabase init
+
+  _supabase:start:
+    desc: start local Supabase emulator
+    cmds:
+      - supabase start
+
+  _supabase:stop:
+    desc: stop local Supabase emulator
+    cmds:
+      - supabase stop
+
+  _supabase:status:
+    desc: show Supabase emulator status and connection info
+    cmds:
+      - supabase status
+
+  _supabase:reset:
+    desc: reset Supabase database and apply schema (local)
+    cmds:
+      - supabase db reset
+
+  _supabase:reset-remote:
+    desc: 'reset remote Supabase database (WARNING: deletes all data)'
+    cmds:
+      - supabase db reset --linked
+
+  _supabase:studio:
+    desc: open Supabase Studio UI in browser
+    cmds:
+      - supabase studio
+
+  _stripe:local:
+    desc: start Stripe CLI webhook listener for local billing tests
+    cmds:
+      - stripe listen --forward-to localhost:54321/functions/v1/api/billing/webhook

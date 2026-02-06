@@ -197,3 +197,72 @@ def test_onboarding_requires_auth() -> None:
         timeout=15,
     )
     assert post_resp.status_code == 401
+
+
+@pytest.mark.local
+@pytest.mark.integration
+def test_onboarding_completion_with_project() -> None:
+    """Completing onboarding should store generatedProjectId and project should exist."""
+    from test.utils import sign_up_user
+
+    env = resolve_env()
+    supabase_url = env.get("SUPABASE_URL", "").rstrip("/")
+    anon_key = env.get("SUPABASE_ANON_KEY")
+    if not supabase_url or not anon_key:
+        pytest.skip("SUPABASE_URL and SUPABASE_ANON_KEY required.")
+
+    api_url = _build_api_url(env)
+
+    # Sign up a fresh user to avoid conflicts with other tests
+    user = sign_up_user(supabase_url, api_url, anon_key, "onboard_proj")
+    headers = auth_headers(user["token"])
+
+    # Create a project (simulates what GeneratingAppScreen does)
+    import uuid
+    project_id = f"project-{uuid.uuid4().hex[:8]}"
+    project_resp = requests.post(
+        f"{api_url}/projects",
+        headers=headers,
+        json={
+            "id": project_id,
+            "name": "Onboarding Test App",
+            "model": "claude-sonnet-4-5",
+        },
+        timeout=20,
+    )
+    assert project_resp.status_code == 200, f"Failed to create project: {project_resp.text}"
+
+    # Complete onboarding with all answers including generatedProjectId
+    complete_resp = requests.post(
+        f"{api_url}/users/onboarding",
+        headers=headers,
+        json={
+            "motivation": "fun",
+            "goal": "entertainment",
+            "progress": "idea",
+            "codingExperience": "none",
+            "aiExperience": "never",
+            "appDescription": "A test app from onboarding",
+            "appIcon": "sparkles:cyan",
+            "appName": "Onboarding Test App",
+            "generatedProjectId": project_id,
+            "currentStep": 17,
+            "completed": True,
+        },
+        timeout=15,
+    )
+    assert complete_resp.status_code == 200, complete_resp.text
+
+    # Verify onboarding status has the project ID
+    status_resp = requests.get(f"{api_url}/users/onboarding", headers=headers, timeout=15)
+    assert status_resp.status_code == 200, status_resp.text
+    data = status_resp.json()
+    assert data["completed"] is True
+    assert data["answers"].get("generatedProjectId") == project_id
+    assert data["answers"].get("appName") == "Onboarding Test App"
+
+    # Verify project exists and is accessible
+    proj_resp = requests.get(f"{api_url}/projects/{project_id}", headers=headers, timeout=15)
+    assert proj_resp.status_code == 200, f"Project should exist: {proj_resp.text}"
+    proj_data = proj_resp.json()
+    assert proj_data.get("name") == "Onboarding Test App" or proj_data.get("id") == project_id
