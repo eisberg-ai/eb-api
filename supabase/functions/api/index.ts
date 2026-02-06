@@ -9,6 +9,7 @@ import { handleWorkspaces } from "./routes/workspaces.ts";
 import { handleProjects } from "./routes/projects.ts";
 import { handleBuilds } from "./routes/builds.ts";
 import { handleGenerate } from "./routes/generate.ts";
+import { handleIcons } from "./routes/icons.ts";
 import { handleServices } from "./routes/services.ts";
 import { handleMedia } from "./routes/media.ts";
 import { handleUsers } from "./routes/users.ts";
@@ -116,6 +117,9 @@ export const handler = async (req: Request) => {
 
     const genHandled = maybeWithCors(await handleGenerate(req, segments, url, body));
     if (genHandled) return genHandled;
+
+    const iconsHandled = maybeWithCors(await handleIcons(req, segments, url, body));
+    if (iconsHandled) return iconsHandled;
 
     const servicesHandled = maybeWithCors(await handleServices(req, segments, url, body));
     if (servicesHandled) return servicesHandled;

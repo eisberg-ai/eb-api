@@ -940,6 +940,7 @@ async function handlePostProject(req: Request, body: any) {
   }
   let workspaceId = body.workspace_id ?? body.workspaceId ?? null;
   const initialPrompt = body.initial_prompt ?? body.initialPrompt as string | undefined;
+  const icon = body.icon as string | undefined;
   if (name === "New Project" && initialPrompt && initialPrompt.trim()) {
     const generatedName = await generateTitleFromPrompt(initialPrompt.trim());
     if (generatedName && generatedName.trim()) {
@@ -957,6 +958,7 @@ async function handlePostProject(req: Request, body: any) {
     model,
     is_public: isPublic,
     workspace_id: workspaceId,
+    ...(icon ? { icon } : {}),
   };
   const gallerySlugRaw = body.gallery_slug ?? body.gallerySlug;
   if (gallerySlugRaw !== undefined) {
@@ -1015,6 +1017,7 @@ async function handlePostProject(req: Request, body: any) {
     model: project.model ?? model,
     is_public: project.is_public ?? isPublic,
     workspace_id: project.workspace_id ?? workspaceId,
+    icon: project.icon ?? null,
   });
 }
 
