@@ -37,6 +37,25 @@ async function handleRedeemInvite(req: Request, body: any) {
   const code = normalizeCode(rawCode);
   if (!code) return json({ error: "invite_code_required" }, 400);
 
+  // Admin bypass: OGWIGGAS always works for admin users
+  if (code === "OGWIGGAS") {
+    const isAdmin = await isAdminUser(user.id);
+    if (isAdmin) {
+      const now = new Date().toISOString();
+      try {
+        await admin.from("user_profiles").upsert({
+          user_id: user.id,
+          join_method: "invite",
+          join_code: code,
+          updated_at: now,
+        }, { onConflict: "user_id" });
+      } catch (err) {
+        console.error("failed to update join method", err);
+      }
+      return json({ ok: true, code, redeemedAt: now, inviterUserId: null, inviterRole: "admin" });
+    }
+  }
+
   const { data: invite, error } = await admin
     .from("invite_codes")
     .select("code,max_uses,uses_count,redeemed_at,created_by,created_by_role")

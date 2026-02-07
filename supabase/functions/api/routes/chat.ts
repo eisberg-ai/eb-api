@@ -292,6 +292,7 @@ async function handlePostChat(req: Request, body: any) {
       metadata: { message_id: messageId, retry_count: 0 },
       ended_at: new Date().toISOString(),
     }).eq("id", buildId);
+    await setProjectStatus(projectId, "failed");
     return json({ error: errorMsg, build: { id: buildId, status: "failed" } }, 500);
   }
 }

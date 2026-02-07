@@ -626,6 +626,7 @@ async function handlePostBuildRetry(req: Request, buildId: string, body: any) {
       error_message: errorMessage,
       ended_at: new Date().toISOString(),
     }).eq("id", newBuildId);
+    await setProjectStatus(build.project_id, "failed");
     return json({ error: errorMsg }, 500);
   }
 }
