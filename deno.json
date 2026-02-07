@@ -1,0 +1,13 @@
+{
+  "lint": {
+    "rules": {
+      "exclude": [
+        "no-explicit-any",
+        "require-await",
+        "no-import-prefix",
+        "no-unused-vars",
+        "verbatim-module-syntax"
+      ]
+    }
+  }
+}

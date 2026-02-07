@@ -1,5 +1,5 @@
 import { json } from "../lib/response.ts";
-import { admin, defaultAgentVersion, getApiBaseUrl } from "../lib/env.ts";
+import { admin, defaultAgentVersion, getApiBaseUrl, storageClient, gcsEndpoint, gcsMediaBucket, gcsMediaPublicBase } from "../lib/env.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { getProjectAccess } from "../lib/access.ts";
 import { ensureProject, getCurrentWorkspaceId, DEFAULT_MODEL, isProModel, normalizeProjectStatus, validateModelStub } from "../lib/project.ts";
@@ -7,6 +7,31 @@ import { createNotification } from "../lib/notifications.ts";
 import { callLLM } from "../lib/llm.ts";
 import { getServicesRegistry } from "../lib/registry.ts";
 import { sha256Hex } from "../lib/crypto.ts";
+
+const DEFAULT_LIST_PAGE_SIZE = 12;
+const MAX_LIST_PAGE_SIZE = 100;
+
+type ProjectListVisibility = "all" | "public" | "private";
+
+const parsePageSize = (raw: string | null): number | null => {
+  if (raw == null) return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_LIST_PAGE_SIZE;
+  return Math.max(1, Math.min(MAX_LIST_PAGE_SIZE, Math.trunc(parsed)));
+};
+
+const parseOffset = (raw: string | null): number => {
+  const parsed = Number(raw ?? "0");
+  if (!Number.isFinite(parsed)) return 0;
+  return Math.max(0, Math.trunc(parsed));
+};
+
+const parseVisibility = (raw: string | null): ProjectListVisibility => {
+  const normalized = (raw ?? "").trim().toLowerCase();
+  if (normalized === "public") return "public";
+  if (normalized === "private") return "private";
+  return "all";
+};
 
 async function generateTitleFromPrompt(prompt: string): Promise<string | null> {
   try {
@@ -203,7 +228,7 @@ async function handleGetProjectServices(req: Request, projectId: string) {
   }
   const { data, error } = await admin
     .from("project_services")
-    .select("service_stub, config, enabled, disabled_reason, disabled_at")
+    .select("service_stub, config, enabled, disabled_reason, disabled_at, invocation_count, last_invoked_at")
     .eq("project_id", projectId);
   if (error) return json({ error: error.message }, 500);
   const apiBaseUrl = getApiBaseUrl(req);
@@ -218,6 +243,8 @@ async function handleGetProjectServices(req: Request, projectId: string) {
       enabled: boolean;
       disabledReason: string | null;
       disabledAt: string | null;
+      invocationCount: number;
+      lastInvokedAt: string | null;
       proxyEndpoint?: string;
     } = {
       stub,
@@ -226,6 +253,8 @@ async function handleGetProjectServices(req: Request, projectId: string) {
       enabled: row.enabled ?? true,
       disabledReason: row.disabled_reason ?? null,
       disabledAt: row.disabled_at ?? null,
+      invocationCount: row.invocation_count ?? 0,
+      lastInvokedAt: row.last_invoked_at ?? null,
     };
     if (apiBaseUrl && stub && type) base.proxyEndpoint = `${apiBaseUrl}/services/${type}/${stub}?projectId=${projectId}`;
     return base;
@@ -551,7 +580,16 @@ async function handlePostMessage(req: Request, projectId: string, body: any) {
   return json({ ok: true, message: msgPayload });
 }
 
-async function fetchProjectsForUser(userId: string, includeDrafts: boolean) {
+async function fetchProjectsForUser(
+  userId: string,
+  includeDrafts: boolean,
+  options?: {
+    limit?: number | null;
+    offset?: number;
+    search?: string;
+    visibility?: ProjectListVisibility;
+  },
+) {
   const { data: ownedProjects, error: ownedErr } = await admin
     .from("projects")
     .select("id, name, owner_user_id, current_version_number, latest_build_id, created_at, updated_at, model, is_public, private_pending_expiry, private_expiry_at, workspace_id, status")
@@ -573,7 +611,7 @@ async function fetchProjectsForUser(userId: string, includeDrafts: boolean) {
     const bTime = b.updated_at ? new Date(b.updated_at).getTime() : 0;
     return bTime - aTime;
   });
-  return visibleProjects.map((p: any) => ({
+  const mappedProjects = visibleProjects.map((p: any) => ({
     id: p.id,
     title: p.name || "New Project",
     description: "",
@@ -588,6 +626,33 @@ async function fetchProjectsForUser(userId: string, includeDrafts: boolean) {
     status: (p.status as string | undefined) ?? null,
     current_version_id: p.current_version_number ?? null,
   }));
+
+  const normalizedSearch = (options?.search ?? "").trim().toLowerCase();
+  const visibility = options?.visibility ?? "all";
+  let filteredProjects = mappedProjects;
+  if (normalizedSearch) {
+    filteredProjects = filteredProjects.filter((project: any) =>
+      String(project?.title ?? "").toLowerCase().includes(normalizedSearch),
+    );
+  }
+  if (visibility === "public") {
+    filteredProjects = filteredProjects.filter((project: any) => project?.is_public !== false);
+  } else if (visibility === "private") {
+    filteredProjects = filteredProjects.filter((project: any) => project?.is_public === false);
+  }
+
+  const total = filteredProjects.length;
+  const offset = Math.max(0, options?.offset ?? 0);
+  const hasPagination = typeof options?.limit === "number";
+  const pagedProjects = hasPagination
+    ? filteredProjects.slice(offset, offset + (options?.limit ?? DEFAULT_LIST_PAGE_SIZE))
+    : filteredProjects;
+  return {
+    projects: pagedProjects,
+    total,
+    limit: hasPagination ? (options?.limit ?? DEFAULT_LIST_PAGE_SIZE) : pagedProjects.length,
+    offset: hasPagination ? offset : 0,
+  };
 }
 
 async function handleGetProjects(req: Request, url: URL) {
@@ -598,9 +663,31 @@ async function handleGetProjects(req: Request, url: URL) {
   }
   if (!userId) return json({ error: "unauthorized" }, 401);
   const includeDrafts = ["1", "true"].includes((url.searchParams.get("include_drafts") || "").toLowerCase());
-  console.log("[projects] handleGetProjects start", { userId, service: auth.service, includeDrafts });
-  const projectsWithMetadata = await fetchProjectsForUser(userId, includeDrafts);
-  return json({ projects: projectsWithMetadata });
+  const limit = parsePageSize(url.searchParams.get("limit"));
+  const offset = parseOffset(url.searchParams.get("offset"));
+  const search = (url.searchParams.get("search") ?? "").trim();
+  const visibility = parseVisibility(url.searchParams.get("visibility"));
+  console.log("[projects] handleGetProjects start", {
+    userId,
+    service: auth.service,
+    includeDrafts,
+    limit,
+    offset,
+    visibility,
+    hasSearch: !!search,
+  });
+  const { projects, total, limit: resolvedLimit, offset: resolvedOffset } = await fetchProjectsForUser(userId, includeDrafts, {
+    limit,
+    offset,
+    search,
+    visibility,
+  });
+  return json({
+    projects,
+    total,
+    limit: resolvedLimit,
+    offset: resolvedOffset,
+  });
 }
 
 function serializeBuild(build: any) {
@@ -689,7 +776,7 @@ async function buildProjectPayload(projectId: string, userId?: string) {
     gallery_slug: project.gallery_slug ?? null,
     gallery: project.gallery ?? null,
     workspace_id: project.workspace_id ?? null,
-    status: project.status ?? null,
+    app_icon_url: project.app_icon_url ?? null,
   };
 }
 
@@ -743,7 +830,7 @@ async function handleGetProjectsStream(req: Request, url: URL) {
       const loop = async () => {
         while (!signal.aborted) {
           try {
-            const projects = await fetchProjectsForUser(userId, includeDrafts);
+            const { projects } = await fetchProjectsForUser(userId, includeDrafts);
             const payload = JSON.stringify({ projects });
             if (payload !== lastPayload) {
               send("projects", payload);
@@ -1242,6 +1329,68 @@ async function handleDeleteProject(req: Request, projectId: string) {
   return json({ ok: true });
 }
 
+const ALLOWED_ICON_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+const MAX_ICON_SIZE = 5 * 1024 * 1024; // 5MB
+
+function getIconMediaUrl(objectKey: string): string {
+  if (gcsMediaPublicBase) {
+    return `${gcsMediaPublicBase}/${objectKey}`;
+  }
+  try {
+    const urlObj = new URL(gcsEndpoint);
+    if (urlObj.host.startsWith(`${gcsMediaBucket}.`)) {
+      return `${urlObj.origin}/${objectKey}`;
+    }
+  } catch {
+    return `${gcsEndpoint}/${gcsMediaBucket}/${objectKey}`;
+  }
+  return `${gcsEndpoint}/${gcsMediaBucket}/${objectKey}`;
+}
+
+async function handlePostAppIcon(req: Request, projectId: string) {
+  const { user } = await getUserOrService(req);
+  if (!user) return json({ error: "unauthorized" }, 401);
+  const access = await getProjectAccess(projectId, user.id);
+  if (!access.project) return json({ error: "not found" }, 404);
+  if (!access.isOwner && !access.isWorkspaceMember && !access.isAdmin) {
+    return json({ error: "forbidden" }, 403);
+  }
+  const formData = await req.formData();
+  const file = formData.get("file") as File | null;
+  if (!file) return json({ error: "file required" }, 400);
+  if (!ALLOWED_ICON_TYPES.includes(file.type)) {
+    return json({ error: `invalid file type. allowed: ${ALLOWED_ICON_TYPES.join(", ")}` }, 400);
+  }
+  if (file.size > MAX_ICON_SIZE) {
+    return json({ error: `file too large. max size: ${MAX_ICON_SIZE / 1024 / 1024}MB` }, 400);
+  }
+  if (!storageClient) {
+    return json({ error: "storage not configured" }, 500);
+  }
+  const fileId = `icon-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const ext = file.name.split(".").pop() || "png";
+  const objectKey = `${projectId}/icons/${fileId}.${ext}`;
+  const fileBuffer = await file.arrayBuffer();
+  const objectUrl = new URL(gcsEndpoint);
+  const uploadUrl = `${objectUrl.origin}/${gcsMediaBucket}/${objectKey}`;
+  const uploadRes = await storageClient.fetch(uploadUrl, {
+    method: "PUT",
+    headers: { "Content-Type": file.type },
+    body: fileBuffer,
+  });
+  if (!uploadRes.ok) {
+    const errorText = await uploadRes.text();
+    return json({ error: `upload failed: ${uploadRes.status} ${errorText}` }, 500);
+  }
+  const appIconUrl = getIconMediaUrl(objectKey);
+  const { error } = await admin
+    .from("projects")
+    .update({ app_icon_url: appIconUrl, updated_at: new Date().toISOString() })
+    .eq("id", projectId);
+  if (error) return json({ error: error.message }, 500);
+  return json({ app_icon_url: appIconUrl });
+}
+
 export async function handleProjects(req: Request, segments: string[], url: URL, body: any) {
   const method = req.method.toUpperCase();
   if (segments[0] !== "projects") return null;
@@ -1310,6 +1459,10 @@ export async function handleProjects(req: Request, segments: string[], url: URL,
   // POST /projects/{id}/messages
   if (method === "POST" && segments[2] === "messages") {
     return handlePostMessage(req, segments[1], body);
+  }
+  // POST /projects/{id}/icon
+  if (method === "POST" && segments[2] === "icon" && segments.length === 3) {
+    return handlePostAppIcon(req, segments[1]);
   }
   // GET /projects
   if (method === "GET" && segments.length === 1) {

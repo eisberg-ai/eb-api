@@ -60,7 +60,8 @@ export const handler = async (req: Request) => {
 
     const shouldReadBody = method !== "GET" && method !== "HEAD";
     const isMediaRoute = segments[0] === "media" && method === "POST";
-    const rawBody = shouldReadBody && !isMediaRoute ? await req.text() : "";
+    const isIconUpload = segments[0] === "projects" && segments[2] === "icon" && method === "POST";
+    const rawBody = shouldReadBody && !isMediaRoute && !isIconUpload ? await req.text() : "";
     let body: any = {};
     if (rawBody) {
       try {

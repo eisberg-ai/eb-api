@@ -107,7 +107,7 @@ async function getSummaryData() {
     console.error("[admin] credit balance total error", err);
   }
 
-  let creditTotals = { purchase: 0, spend: 0, adjustment: 0 };
+  const creditTotals = { purchase: 0, spend: 0, adjustment: 0 };
   try {
     const { data } = await admin.from("credit_ledger").select("credits_delta,type");
     (data ?? []).forEach((row: any) => {

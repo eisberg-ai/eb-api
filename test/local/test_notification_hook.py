@@ -10,7 +10,13 @@ import uuid
 import pytest
 import requests
 
-from test.utils import admin_headers, auth_headers, ensure_access_token, resolve_api_url, resolve_env
+from test.utils import (
+    admin_headers,
+    auth_headers,
+    ensure_access_token,
+    resolve_api_url,
+    resolve_env,
+)
 
 
 def decode_jwt_sub(token: str) -> str:

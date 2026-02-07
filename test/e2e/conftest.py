@@ -3,13 +3,21 @@ from __future__ import annotations
 
 import os
 import uuid
+from collections.abc import Generator
 from pathlib import Path
-from typing import Any, Generator
+from typing import Any
 
 import pytest
 import requests
 
-from test.utils import approve_user, auth_headers, load_env_file, resolve_api_url, resolve_env, sign_up_user
+from test.utils import (
+    approve_user,
+    auth_headers,
+    load_env_file,
+    resolve_api_url,
+    resolve_env,
+    sign_up_user,
+)
 
 
 def _get_eb_api_supabase_config() -> dict[str, str]:

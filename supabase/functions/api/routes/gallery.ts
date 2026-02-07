@@ -3,7 +3,7 @@ import { json } from "../lib/response.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { getProjectAccess } from "../lib/access.ts";
 
-const DEFAULT_LIMIT = 24;
+const DEFAULT_LIMIT = 12;
 const MAX_LIMIT = 100;
 
 const normalizeQuery = (value: string) =>
@@ -71,6 +71,24 @@ const normalizeGallery = (gallery: any) => {
   return gallery;
 };
 
+const matchesTaxonomyFilters = (project: any, tags: string[], categories: string[]) => {
+  if (tags.length === 0 && categories.length === 0) return true;
+  const gallery = normalizeGallery(project?.gallery);
+  if (tags.length > 0) {
+    const itemTags = Array.isArray(pickGalleryValue(gallery, "tags", []))
+      ? pickGalleryValue(gallery, "tags", [])
+      : [];
+    if (!tags.some((tag) => itemTags.includes(tag))) return false;
+  }
+  if (categories.length > 0) {
+    const itemCategories = Array.isArray(pickGalleryValue(gallery, "categories", []))
+      ? pickGalleryValue(gallery, "categories", [])
+      : [];
+    if (!categories.some((category) => itemCategories.includes(category))) return false;
+  }
+  return true;
+};
+
 async function handleGetGallery(req: Request, url: URL) {
   const { user } = await getUserOrService(req);
   if (!user) return json({ error: "unauthorized" }, 401);
@@ -80,23 +98,58 @@ async function handleGetGallery(req: Request, url: URL) {
   const tags = parseListParam(url.searchParams.get("tags"));
   const categories = parseListParam(url.searchParams.get("categories"));
 
-  let query = admin
-    .from("projects")
-    .select("id, name, owner_user_id, updated_at, created_at, is_public, is_gallery, gallery_slug, gallery, latest_build_id, status")
-    .eq("is_public", true)
-    .neq("status", "draft")
-    .neq("status", "archived")
-    .order("updated_at", { ascending: false })
-    .range(offset, offset + limit - 1);
+  let projects: any[] = [];
+  let total = 0;
 
-  if (search) {
-    query = query.ilike("name", `%${search}%`);
+  if (tags.length > 0 || categories.length > 0) {
+    let unpagedQuery = admin
+      .from("projects")
+      .select("id, name, owner_user_id, updated_at, created_at, is_public, is_gallery, gallery_slug, gallery, latest_build_id, status")
+      .eq("is_public", true)
+      .neq("status", "draft")
+      .neq("status", "archived")
+      .order("updated_at", { ascending: false });
+    if (search) {
+      unpagedQuery = unpagedQuery.ilike("name", `%${search}%`);
+    }
+    const { data: allProjects, error: unpagedError } = await unpagedQuery;
+    if (unpagedError) return json({ error: unpagedError.message }, 500);
+    const taxonomyFiltered = (allProjects ?? []).filter((project: any) =>
+      matchesTaxonomyFilters(project, tags, categories),
+    );
+    total = taxonomyFiltered.length;
+    projects = taxonomyFiltered.slice(offset, offset + limit);
+  } else {
+    let countQuery = admin
+      .from("projects")
+      .select("id", { count: "exact", head: true })
+      .eq("is_public", true)
+      .neq("status", "draft")
+      .neq("status", "archived");
+    if (search) {
+      countQuery = countQuery.ilike("name", `%${search}%`);
+    }
+    const { count, error: countError } = await countQuery;
+    if (countError) return json({ error: countError.message }, 500);
+    total = count ?? 0;
+
+    let pagedQuery = admin
+      .from("projects")
+      .select("id, name, owner_user_id, updated_at, created_at, is_public, is_gallery, gallery_slug, gallery, latest_build_id, status")
+      .eq("is_public", true)
+      .neq("status", "draft")
+      .neq("status", "archived")
+      .order("updated_at", { ascending: false })
+      .range(offset, offset + limit - 1);
+    if (search) {
+      pagedQuery = pagedQuery.ilike("name", `%${search}%`);
+    }
+    const { data: pagedProjects, error: pagedError } = await pagedQuery;
+    if (pagedError) return json({ error: pagedError.message }, 500);
+    projects = pagedProjects ?? [];
   }
 
-  const { data: projects, error } = await query;
-  if (error) return json({ error: error.message }, 500);
-
-  const buildIds = (projects ?? [])
+  const buildIds = projects
     .map((project: any) => project.latest_build_id)
     .filter(Boolean);
   const buildMap = new Map<string, any>();
@@ -108,7 +161,7 @@ async function handleGetGallery(req: Request, url: URL) {
     (builds ?? []).forEach((b: any) => buildMap.set(b.id, b));
   }
 
-  const items = (projects ?? []).map((project: any) => {
+  const items = projects.map((project: any) => {
     const gallery = normalizeGallery(project.gallery);
     const build = project.latest_build_id ? buildMap.get(project.latest_build_id) : null;
     return {
@@ -127,20 +180,7 @@ async function handleGetGallery(req: Request, url: URL) {
       version_number: build?.version_number ?? null,
     };
   });
-
-  const filteredItems = items.filter((item) => {
-    if (tags.length > 0) {
-      const itemTags = Array.isArray(item.tags) ? item.tags : [];
-      if (!tags.some((tag) => itemTags.includes(tag))) return false;
-    }
-    if (categories.length > 0) {
-      const itemCategories = Array.isArray(item.categories) ? item.categories : [];
-      if (!categories.some((category) => itemCategories.includes(category))) return false;
-    }
-    return true;
-  });
-
-  return json({ items: filteredItems });
+  return json({ items, total, limit, offset });
 }
 
 async function handleGetGalleryItem(req: Request, slugOrId: string) {

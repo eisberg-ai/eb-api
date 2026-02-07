@@ -10,13 +10,19 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import requests
 
-from test.utils import auth_headers, ensure_access_token, load_env_file, resolve_api_url, resolve_env
+from test.utils import (
+    auth_headers,
+    ensure_access_token,
+    load_env_file,
+    resolve_api_url,
+    resolve_env,
+)
 
 STRIPE_API_BASE = "https://api.stripe.com"
 
@@ -79,7 +85,7 @@ def decode_jwt_payload(token: str) -> dict:
 
 
 def unix_to_iso(timestamp: int) -> str:
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")
 
 
 def supabase_upsert(env: dict[str, str], table: str, rows: list[dict], on_conflict: str) -> None:

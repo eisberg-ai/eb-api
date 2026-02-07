@@ -12,7 +12,6 @@ import requests
 
 from test.utils import (
     admin_headers,
-    auth_headers,
     create_project,
     ensure_access_token,
     resolve_api_url,

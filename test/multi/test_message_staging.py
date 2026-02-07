@@ -12,7 +12,7 @@ import requests
 from test.utils import ensure_access_token, resolve_api_url, resolve_env
 
 
-def resolve_test_auth() -> tuple[str, str]:
+def resolve_test_auth() -> tuple[str, str, str]:
     env = resolve_env()
     service_key = env.get("SUPABASE_SERVICE_ROLE_KEY")
     if not service_key:
@@ -20,7 +20,7 @@ def resolve_test_auth() -> tuple[str, str]:
     supabase_url = env.get("SUPABASE_URL", "http://127.0.0.1:54321").rstrip("/")
     api_url = resolve_api_url(supabase_url, env)
     access_token = ensure_access_token(service_key, supabase_url)
-    return api_url, access_token
+    return api_url, access_token, service_key
 
 
 @pytest.mark.integration
@@ -199,7 +199,7 @@ def test_build_promotion_on_success() -> None:
     """
     test that staged builds are promoted when dependency succeeds.
     """
-    api_url, access_token = resolve_test_auth()
+    api_url, access_token, service_key = resolve_test_auth()
     project_id = f'project-promote-staging-{uuid.uuid4().hex[:8]}'
     # first message
     first_resp = requests.post(
@@ -248,7 +248,7 @@ def test_failed_build_blocks_new_messages() -> None:
     """
     test that a failed build blocks new messages.
     """
-    api_url, access_token = resolve_test_auth()
+    api_url, access_token, service_key = resolve_test_auth()
     project_id = f'project-failed-staging-{uuid.uuid4().hex[:8]}'
     # create and fail a build
     first_resp = requests.post(
@@ -324,7 +324,7 @@ def test_edit_staged_build_locked_after_promotion() -> None:
     """
     test editing a staged build fails once it starts processing.
     """
-    api_url, access_token = resolve_test_auth()
+    api_url, access_token, service_key = resolve_test_auth()
     project_id = f'project-edit-locked-{uuid.uuid4().hex[:8]}'
     # first message
     first_resp = requests.post(

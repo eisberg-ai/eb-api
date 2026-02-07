@@ -21,8 +21,7 @@ from urllib.parse import urljoin
 import pytest
 import requests
 
-from test.utils import admin_headers, auth_headers
-
+from test.utils import auth_headers
 
 # Test configuration
 BUILD_TIMEOUT_SEC = 900  # 15 minutes for agent execution
@@ -84,7 +83,7 @@ def test_full_app_lifecycle(
     user_token = test_user["token"]
     user_id = test_user["userId"]
 
-    print(f"[e2e] Starting full lifecycle test")
+    print("[e2e] Starting full lifecycle test")
     print(f"[e2e] User: {user_id[:8]}...")
     print(f"[e2e] Project: {project_id}")
 
@@ -171,7 +170,7 @@ def test_full_app_lifecycle(
 
     final_build = poll_build(api_url, build_id, user_token)
     assert final_build.get("status") == "succeeded", f"Build failed: {final_build}"
-    print(f"[e2e] Build succeeded")
+    print("[e2e] Build succeeded")
 
     # Step 5: Verify preview is accessible
     print("[e2e] Step 5: Verifying preview accessibility...")
@@ -230,7 +229,7 @@ def test_simple_build_preview(
     project_id = test_project
     user_token = test_user["token"]
 
-    print(f"[e2e-simple] Starting simple build test")
+    print("[e2e-simple] Starting simple build test")
     print(f"[e2e-simple] Project: {project_id}")
 
     # Send a simple prompt

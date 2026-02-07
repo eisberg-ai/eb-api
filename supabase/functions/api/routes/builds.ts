@@ -252,7 +252,7 @@ async function handlePostWorkerVersion(req: Request, body: any) {
     .order("created_at", { ascending: false })
     .limit(1)
     .single();
-  let buildId = build?.id ?? `build-${projectId}-${version}`;
+  const buildId = build?.id ?? `build-${projectId}-${version}`;
   if (!build) {
     await admin.from("builds").insert({
       id: buildId,

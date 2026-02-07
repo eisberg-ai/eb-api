@@ -172,6 +172,13 @@ async function handleProxyService(req: Request, type: string, stub: string, proj
   const resolvedBody = body ?? {};
   const safeConfig = stripProviderKeys(projectService.config);
   const response = await serviceHandler.proxy(stub, req, { ...resolvedBody, config: safeConfig });
+  // Increment invocation counter (fire-and-forget, don't block response)
+  admin.rpc("increment_service_invocation", {
+    p_project_id: projectId,
+    p_service_stub: stub,
+  }).then(({ error }: any) => {
+    if (error) console.error("failed to increment service invocation", error);
+  });
   return response;
 }
 

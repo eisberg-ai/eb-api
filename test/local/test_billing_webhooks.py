@@ -9,7 +9,7 @@ import hmac
 import json
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 import pytest
 import requests
@@ -31,7 +31,7 @@ def iso_to_unix(value: str) -> int:
 
 def build_stripe_signature(payload: str, secret: str, timestamp: int | None = None) -> str:
     ts = int(time.time()) if timestamp is None else int(timestamp)
-    signed_payload = f"{ts}.{payload}".encode("utf-8")
+    signed_payload = f"{ts}.{payload}".encode()
     digest = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
     return f"t={ts},v1={digest}"
 

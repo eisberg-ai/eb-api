@@ -16,7 +16,6 @@ To save output PNGs for inspection:
 """
 from __future__ import annotations
 
-import io
 from pathlib import Path
 
 import pytest

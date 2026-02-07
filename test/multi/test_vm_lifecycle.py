@@ -170,7 +170,7 @@ def test_claim_sets_lease_expiry() -> None:
     try:
         # Create project and acquire VM
         project_id = create_project(api_url, access_token)
-        resp = requests.post(
+        _resp = requests.post(
             f"{api_url}/vm/acquire",
             headers=admin_headers(service_key),
             json={"project_id": project_id},
