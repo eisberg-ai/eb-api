@@ -1,5 +1,6 @@
 import { json } from "../lib/response.ts";
-import { admin, storageClient, gcsEndpoint, gcsMediaBucket, gcsMediaPublicBase } from "../lib/env.ts";
+import { admin } from "../lib/env.ts";
+import { uploadObject, downloadObject, getObjectUrl } from "../lib/storage.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { ensureProject } from "../lib/project.ts";
 
@@ -21,21 +22,6 @@ const ALLOWED_AUDIO_TYPES = ["audio/mpeg", "audio/wav", "audio/mp3", "audio/ogg"
 const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"];
 const ALLOWED_FILE_TYPES = ["application/pdf", "text/plain", "application/json", "image/jpeg", "image/png", "image/gif", "image/webp"];
 
-function getMediaUrl(objectKey: string): string {
-  if (gcsMediaPublicBase) {
-    return `${gcsMediaPublicBase}/${objectKey}`;
-  }
-  try {
-    const urlObj = new URL(gcsEndpoint);
-    if (urlObj.host.startsWith(`${gcsMediaBucket}.`)) {
-      return `${urlObj.origin}/${objectKey}`;
-    }
-  } catch {
-    return `${gcsEndpoint}/${gcsMediaBucket}/${objectKey}`;
-  }
-  return `${gcsEndpoint}/${gcsMediaBucket}/${objectKey}`;
-}
-
 function buildMediaResponse(m: any, type: "audio" | "image") {
   const mediaId = m.id;
   const objectKey = m.r2_key || m.r2Key;
@@ -47,7 +33,7 @@ function buildMediaResponse(m: any, type: "audio" | "image") {
     sizeBytes: m.size_bytes ?? m.sizeBytes,
     createdAt: m.created_at || m.createdAt || new Date().toISOString(),
     // Prefer a CDN/public URL so the frontend can render <img> tags without auth headers.
-    url: objectKey ? getMediaUrl(objectKey) : apiUrl,
+    url: objectKey ? getObjectUrl(objectKey) : apiUrl,
     // Keep the API path as a fallback for any authenticated fetches.
     fileUrl: apiUrl,
   };
@@ -140,30 +126,16 @@ async function handleGetMediaFile(req: Request, type: "audio" | "image", mediaId
       return json({ error: "forbidden" }, 403);
     }
   }
-  if (!storageClient) {
-    return json({ error: "storage not configured" }, 500);
+  const result = await downloadObject(media.r2_key);
+  if (!result) {
+    return json({ error: "storage not configured or file not found" }, 500);
   }
-  try {
-    const objectUrl = new URL(gcsEndpoint);
-    const res = await storageClient.fetch(objectUrl.origin, {
-      method: "GET",
-      path: `/${gcsMediaBucket}/${media.r2_key}`,
-    });
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error("storage fetch failed", { status: res.status, error: errorText, objectKey: media.r2_key });
-      return json({ error: `failed to fetch file: ${res.status} ${errorText}` }, 500);
-    }
-    const body = await res.arrayBuffer();
-    const headers = new Headers();
-    headers.set("Access-Control-Allow-Origin", "*");
-    headers.set("Content-Type", media.mime_type);
-    headers.set("Content-Length", body.byteLength.toString());
-    return new Response(body, { status: 200, headers });
-  } catch (err) {
-    console.error("handleGetMediaFile error:", err);
-    return json({ error: (err as Error).message }, 500);
-  }
+  const body = await result.response.arrayBuffer();
+  const headers = new Headers();
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Content-Type", media.mime_type);
+  headers.set("Content-Length", body.byteLength.toString());
+  return new Response(body, { status: 200, headers });
 }
 
 async function handlePostFile(req: Request, projectId: string) {
@@ -193,21 +165,9 @@ async function handlePostFile(req: Request, projectId: string) {
     const fileId = `file-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const objectKey = `${projectId}/files/${fileId}-${file.name}`;
     const fileBuffer = await file.arrayBuffer();
-    if (!storageClient) {
-      return json({ error: "storage not configured" }, 500);
-    }
-    const objectUrl = new URL(gcsEndpoint);
-    const uploadUrl = `${objectUrl.origin}/${gcsMediaBucket}/${objectKey}`;
-    const uploadRes = await storageClient.fetch(uploadUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Type": file.type,
-      },
-      body: fileBuffer,
-    });
-    if (!uploadRes.ok) {
-      const errorText = await uploadRes.text();
-      return json({ error: `upload failed: ${uploadRes.status} ${errorText}` }, 500);
+    const result = await uploadObject(objectKey, fileBuffer, file.type);
+    if (!result.ok) {
+      return json({ error: `upload failed: ${result.error}` }, 500);
     }
     const { error: insertError } = await admin.from("media").insert({
       id: fileId,
@@ -227,7 +187,7 @@ async function handlePostFile(req: Request, projectId: string) {
       filename: file.name,
       mimeType: file.type,
       sizeBytes: file.size,
-      url: getMediaUrl(objectKey),
+      url: getObjectUrl(objectKey, result.provider),
       fileUrl: `/api/media/file/${fileId}/file`,
       createdAt: new Date().toISOString(),
     });
@@ -268,21 +228,9 @@ async function handlePostMedia(req: Request, type: "audio" | "image", projectId:
     const mediaId = `media-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     const objectKey = `${projectId}/${type}/${mediaId}-${file.name}`;
     const fileBuffer = await file.arrayBuffer();
-    if (!storageClient) {
-      return json({ error: "storage not configured" }, 500);
-    }
-    const objectUrl = new URL(gcsEndpoint);
-    const uploadUrl = `${objectUrl.origin}/${gcsMediaBucket}/${objectKey}`;
-    const uploadRes = await storageClient.fetch(uploadUrl, {
-      method: "PUT",
-      headers: {
-        "Content-Type": file.type,
-      },
-      body: fileBuffer,
-    });
-    if (!uploadRes.ok) {
-      const errorText = await uploadRes.text();
-      return json({ error: `upload failed: ${uploadRes.status} ${errorText}` }, 500);
+    const result = await uploadObject(objectKey, fileBuffer, file.type);
+    if (!result.ok) {
+      return json({ error: `upload failed: ${result.error}` }, 500);
     }
     const { error: insertError } = await admin.from("media").insert({
       id: mediaId,
@@ -297,19 +245,15 @@ async function handlePostMedia(req: Request, type: "audio" | "image", projectId:
     if (insertError) {
       return json({ error: insertError.message }, 500);
     }
-    return json(
-      buildMediaResponse(
-        {
-          id: mediaId,
-          filename: file.name,
-          mime_type: file.type,
-          size_bytes: file.size,
-          r2_key: objectKey,
-          created_at: new Date().toISOString(),
-        },
-        type,
-      ),
-    );
+    return json({
+      id: mediaId,
+      filename: file.name,
+      mimeType: file.type,
+      sizeBytes: file.size,
+      createdAt: new Date().toISOString(),
+      url: getObjectUrl(objectKey, result.provider),
+      fileUrl: `/api/media/${type}/${mediaId}/file`,
+    });
   } catch (err) {
     console.error("handlePostMedia error:", err);
     return json({ error: (err as Error).message }, 500);
@@ -351,7 +295,7 @@ async function handleGetFileList(req: Request, projectId?: string) {
     mimeType: f.mime_type || f.mimeType,
     sizeBytes: f.size_bytes ?? f.sizeBytes,
     createdAt: f.created_at || f.createdAt || new Date().toISOString(),
-    url: getMediaUrl(f.r2_key || f.r2Key),
+    url: getObjectUrl(f.r2_key || f.r2Key),
     fileUrl: `/api/media/file/${f.id}/file`,
   }));
   return json({ items });
@@ -387,7 +331,7 @@ async function handleGetFileItem(req: Request, fileId: string) {
     mimeType: file.mime_type || file.mimeType,
     sizeBytes: file.size_bytes ?? file.sizeBytes,
     createdAt: file.created_at || file.createdAt || new Date().toISOString(),
-    url: getMediaUrl(file.r2_key || file.r2Key),
+    url: getObjectUrl(file.r2_key || file.r2Key),
     fileUrl: `/api/media/file/${file.id}/file`,
   });
 }
@@ -416,30 +360,16 @@ async function handleGetFile(req: Request, fileId: string) {
       return json({ error: "forbidden" }, 403);
     }
   }
-  if (!storageClient) {
-    return json({ error: "storage not configured" }, 500);
+  const result = await downloadObject(file.r2_key);
+  if (!result) {
+    return json({ error: "storage not configured or file not found" }, 500);
   }
-  try {
-    const objectUrl = new URL(gcsEndpoint);
-    const res = await storageClient.fetch(objectUrl.origin, {
-      method: "GET",
-      path: `/${gcsMediaBucket}/${file.r2_key}`,
-    });
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error("storage fetch failed", { status: res.status, error: errorText, objectKey: file.r2_key });
-      return json({ error: `failed to fetch file: ${res.status} ${errorText}` }, 500);
-    }
-    const body = await res.arrayBuffer();
-    const headers = new Headers();
-    headers.set("Access-Control-Allow-Origin", "*");
-    headers.set("Content-Type", file.mime_type);
-    headers.set("Content-Length", body.byteLength.toString());
-    return new Response(body, { status: 200, headers });
-  } catch (err) {
-    console.error("handleGetFile error:", err);
-    return json({ error: (err as Error).message }, 500);
-  }
+  const body = await result.response.arrayBuffer();
+  const headers = new Headers();
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Content-Type", file.mime_type);
+  headers.set("Content-Length", body.byteLength.toString());
+  return new Response(body, { status: 200, headers });
 }
 
 export async function handleMedia(req: Request, segments: string[], _url: URL, _body: any) {

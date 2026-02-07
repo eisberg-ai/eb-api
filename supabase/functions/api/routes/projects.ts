@@ -1,5 +1,6 @@
 import { json } from "../lib/response.ts";
-import { admin, defaultAgentVersion, getApiBaseUrl, storageClient, gcsEndpoint, gcsMediaBucket, gcsMediaPublicBase } from "../lib/env.ts";
+import { admin, defaultAgentVersion, getApiBaseUrl } from "../lib/env.ts";
+import { uploadObject, getObjectUrl } from "../lib/storage.ts";
 import { getUserOrService } from "../lib/auth.ts";
 import { getProjectAccess } from "../lib/access.ts";
 import { ensureProject, getCurrentWorkspaceId, DEFAULT_MODEL, isProModel, normalizeProjectStatus, validateModelStub } from "../lib/project.ts";
@@ -1332,21 +1333,6 @@ async function handleDeleteProject(req: Request, projectId: string) {
 const ALLOWED_ICON_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 const MAX_ICON_SIZE = 5 * 1024 * 1024; // 5MB
 
-function getIconMediaUrl(objectKey: string): string {
-  if (gcsMediaPublicBase) {
-    return `${gcsMediaPublicBase}/${objectKey}`;
-  }
-  try {
-    const urlObj = new URL(gcsEndpoint);
-    if (urlObj.host.startsWith(`${gcsMediaBucket}.`)) {
-      return `${urlObj.origin}/${objectKey}`;
-    }
-  } catch {
-    return `${gcsEndpoint}/${gcsMediaBucket}/${objectKey}`;
-  }
-  return `${gcsEndpoint}/${gcsMediaBucket}/${objectKey}`;
-}
-
 async function handlePostAppIcon(req: Request, projectId: string) {
   const { user } = await getUserOrService(req);
   if (!user) return json({ error: "unauthorized" }, 401);
@@ -1364,25 +1350,15 @@ async function handlePostAppIcon(req: Request, projectId: string) {
   if (file.size > MAX_ICON_SIZE) {
     return json({ error: `file too large. max size: ${MAX_ICON_SIZE / 1024 / 1024}MB` }, 400);
   }
-  if (!storageClient) {
-    return json({ error: "storage not configured" }, 500);
-  }
   const fileId = `icon-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const ext = file.name.split(".").pop() || "png";
   const objectKey = `${projectId}/icons/${fileId}.${ext}`;
   const fileBuffer = await file.arrayBuffer();
-  const objectUrl = new URL(gcsEndpoint);
-  const uploadUrl = `${objectUrl.origin}/${gcsMediaBucket}/${objectKey}`;
-  const uploadRes = await storageClient.fetch(uploadUrl, {
-    method: "PUT",
-    headers: { "Content-Type": file.type },
-    body: fileBuffer,
-  });
-  if (!uploadRes.ok) {
-    const errorText = await uploadRes.text();
-    return json({ error: `upload failed: ${uploadRes.status} ${errorText}` }, 500);
+  const result = await uploadObject(objectKey, fileBuffer, file.type);
+  if (!result.ok) {
+    return json({ error: `upload failed: ${result.error}` }, 500);
   }
-  const appIconUrl = getIconMediaUrl(objectKey);
+  const appIconUrl = getObjectUrl(objectKey, result.provider);
   const { error } = await admin
     .from("projects")
     .update({ app_icon_url: appIconUrl, updated_at: new Date().toISOString() })

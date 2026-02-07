@@ -31,6 +31,22 @@ const storageClient = gcsAccessKey && gcsSecretKey
       region: "auto",
     })
   : null;
+
+// R2 fallback
+const r2Endpoint = (Deno.env.get("CF_R2_ENDPOINT") ?? "").replace(/\/+$/, "");
+const r2MediaBucket = Deno.env.get("CF_R2_MEDIA_BUCKET") ?? Deno.env.get("CF_R2_BUCKET") ?? "";
+const r2MediaPublicBase = (Deno.env.get("CF_R2_MEDIA_PUBLIC_BASE") ?? "").replace(/\/+$/, "");
+const r2AccessKey = Deno.env.get("CF_R2_ACCESS_KEY_ID") ?? "";
+const r2SecretKey = Deno.env.get("CF_R2_SECRET_ACCESS_KEY") ?? "";
+
+const r2Client = r2AccessKey && r2SecretKey && r2Endpoint
+  ? new AwsClient({
+      accessKeyId: r2AccessKey,
+      secretAccessKey: r2SecretKey,
+      service: "s3",
+      region: "auto",
+    })
+  : null;
 if (!supabaseUrl || !supabaseKey) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
 }
@@ -77,6 +93,10 @@ export {
   gcsMediaBucket,
   gcsMediaPublicBase,
   gcsPreviewPublicBase,
+  r2Client,
+  r2Endpoint,
+  r2MediaBucket,
+  r2MediaPublicBase,
   stripe,
   stripeWebhookSecret,
   defaultSuccessUrl,
